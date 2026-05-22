@@ -1524,6 +1524,13 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const [filterMode, setFilterMode] = useState('unresolved'); // 'unresolved' | 'in-collection' | 'all'
   const [index, setIndex] = useState(0);
 
+  // Bulk prefetch state
+  const [prefetching, setPrefetching] = useState(false);
+  const [prefetchDone, setPrefetchDone] = useState(0);
+  const [prefetchTotal, setPrefetchTotal] = useState(0);
+  const [prefetchFailed, setPrefetchFailed] = useState(0);
+  const abortRef = useRef(false);
+
   const queue = useMemo(() => {
     if (filterMode === 'in-collection') {
       const ids = new Set(entries.map(e => e.card_id));
@@ -1534,6 +1541,38 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     }
     return catalog;
   }, [catalog, entries, filterMode]);
+
+  const runPrefetch = async () => {
+    if (prefetching) return;
+    if (!hasToken()) { alert('PriceCharting token missing — set VITE_PRICECHARTING_TOKEN.'); return; }
+    const targets = catalog.filter(c => !isVariantSnapshotFresh(c.id));
+    if (targets.length === 0) { alert('Everything is already resolved.'); return; }
+    if (!confirm(`Prefetch ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} from PriceCharting? This may take several minutes.`)) return;
+    abortRef.current = false;
+    setPrefetching(true);
+    setPrefetchTotal(targets.length);
+    setPrefetchDone(0);
+    setPrefetchFailed(0);
+
+    const concurrency = 3;
+    let idx = 0;
+    const worker = async () => {
+      while (idx < targets.length) {
+        if (abortRef.current) return;
+        const card = targets[idx++];
+        try {
+          const ok = await resolveVariantSnapshot(card);
+          if (!ok) setPrefetchFailed(f => f + 1);
+        } catch {
+          setPrefetchFailed(f => f + 1);
+        }
+        setPrefetchDone(d => d + 1);
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
+    setPrefetching(false);
+  };
+  const cancelPrefetch = () => { abortRef.current = true; };
 
   const currentCard = queue[index];
 
@@ -1597,7 +1636,40 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
           { v: 'in-collection', l: 'Cards in my collections' },
           { v: 'all', l: 'All cards' },
         ]} />
+
+        <div className="op-filter-group">
+          <div className="op-filter-label">Bulk</div>
+          {!prefetching ? (
+            <button className="op-btn-ghost" onClick={runPrefetch} title="Resolve every unresolved card from PriceCharting in the background">
+              <RefreshCw size={14} /> Prefetch all unresolved
+            </button>
+          ) : (
+            <button className="op-btn-ghost" onClick={cancelPrefetch}>
+              <X size={14} /> Cancel
+            </button>
+          )}
+        </div>
       </div>
+
+      {prefetching && (
+        <div className="op-prefetch">
+          <div className="op-prefetch-bar">
+            <div
+              className="op-prefetch-bar-fill"
+              style={{ width: `${prefetchTotal > 0 ? Math.min(100, (prefetchDone / prefetchTotal) * 100) : 0}%` }}
+            />
+          </div>
+          <div className="op-prefetch-meta">
+            Resolving <strong>{prefetchDone.toLocaleString()}</strong> / {prefetchTotal.toLocaleString()}
+            {prefetchFailed > 0 && <> · {prefetchFailed.toLocaleString()} no-match</>}
+          </div>
+        </div>
+      )}
+      {!prefetching && prefetchTotal > 0 && prefetchDone > 0 && prefetchDone >= prefetchTotal && (
+        <div className="op-prefetch-done">
+          Prefetch complete · {(prefetchTotal - prefetchFailed).toLocaleString()} resolved, {prefetchFailed.toLocaleString()} unmatched.
+        </div>
+      )}
 
       {queue.length === 0 ? (
         <div className="op-empty">
