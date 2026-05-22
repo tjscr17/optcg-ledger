@@ -516,6 +516,46 @@ function ModeIndicator() {
 // ============================================================================
 function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers = () => {} }) {
   const members = Array.isArray(collection?.members) ? collection.members : [];
+  const [entrySort, setEntrySort] = useState('recent');
+
+  // Effective market value for an entry — uses the entry's stored graded
+  // price when present, otherwise falls back to the cached PriceCharting raw.
+  const marketValueOf = useCallback((e) => {
+    if (e.grading_company && Number(e.graded_price) > 0) return Number(e.graded_price);
+    const card = catalogIndex.get(e.card_id);
+    return card ? effectiveRawPrice(card) : 0;
+  }, [catalogIndex]);
+
+  const sortedEntries = useMemo(() => {
+    const arr = [...entries];
+    const cardOf = (e) => catalogIndex.get(e.card_id);
+    switch (entrySort) {
+      case 'name':
+        arr.sort((a, b) => (cardOf(a)?.name || '').localeCompare(cardOf(b)?.name || ''));
+        break;
+      case 'set':
+        arr.sort((a, b) => {
+          const ca = cardOf(a), cb = cardOf(b);
+          if (!ca && !cb) return 0;
+          if (!ca) return 1;
+          if (!cb) return -1;
+          if (ca.setId !== cb.setId) return compareSets(ca, cb);
+          return (ca.displayId || ca.id || '').localeCompare(cb.displayId || cb.id || '');
+        });
+        break;
+      case 'market-desc': arr.sort((a, b) => marketValueOf(b) - marketValueOf(a)); break;
+      case 'market-asc':  arr.sort((a, b) => marketValueOf(a) - marketValueOf(b)); break;
+      case 'paid-desc':   arr.sort((a, b) => (Number(b.purchase_price)||0) - (Number(a.purchase_price)||0)); break;
+      case 'paid-asc':    arr.sort((a, b) => (Number(a.purchase_price)||0) - (Number(b.purchase_price)||0)); break;
+      case 'acquired-desc': arr.sort((a, b) => (b.acquired_at || b.added_at || '').localeCompare(a.acquired_at || a.added_at || '')); break;
+      case 'acquired-asc':  arr.sort((a, b) => (a.acquired_at || a.added_at || '').localeCompare(b.acquired_at || b.added_at || '')); break;
+      case 'recent':
+      default:
+        arr.sort((a, b) => (b.added_at || '').localeCompare(a.added_at || ''));
+    }
+    return arr;
+    // variantRev forces resort when fresh PC prices land
+  }, [entries, catalogIndex, entrySort, variantRev, marketValueOf]);
   const stats = useMemo(() => {
     let totalPaid = 0, totalMarket = 0, gradedCount = 0;
     for (const e of entries) {
@@ -573,8 +613,22 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
         </div>
       ) : (
         <>
+          <div className="op-entries-sort">
+            <span className="op-entries-sort-label">Sort by</span>
+            <select value={entrySort} onChange={(e) => setEntrySort(e.target.value)}>
+              <option value="recent">Recently logged</option>
+              <option value="acquired-desc">Date acquired (newest)</option>
+              <option value="acquired-asc">Date acquired (oldest)</option>
+              <option value="name">Name (A → Z)</option>
+              <option value="set">Set</option>
+              <option value="market-desc">Market value ↓</option>
+              <option value="market-asc">Market value ↑</option>
+              <option value="paid-desc">Paid ↓</option>
+              <option value="paid-asc">Paid ↑</option>
+            </select>
+          </div>
           <div className="op-entries">
-            {entries.map(entry => {
+            {sortedEntries.map(entry => {
               const card = catalogIndex.get(entry.card_id);
               if (!card) {
                 return (
@@ -864,7 +918,7 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, on
         <CardThumb card={card} size={48} />
         <div className="op-entry-info">
           <div className="op-entry-cardname">
-            {card.name}
+            <span className="op-entry-cardname-text">{card.name}</span>
             <VariantPill variant={card.variant} />
             {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} />}
           </div>

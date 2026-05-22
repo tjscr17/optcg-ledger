@@ -277,7 +277,10 @@ body { background: var(--paper); }
   color: rgba(255,255,255,0.8);
 }
 .op-entry-info { min-width: 0; }
-.op-entry-cardname { font-family: var(--display); font-weight: 600; font-size: 18px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.op-entry-cardname { font-family: var(--display); font-weight: 600; font-size: 18px; line-height: 1.15; display: flex; align-items: center; gap: 4px; min-width: 0; }
+.op-entry-cardname-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
+.op-entry-cardname .op-grade-badge,
+.op-entry-cardname .op-variant-pill { flex-shrink: 0; }
 .op-entry-cardset { font-size: 11px; color: var(--ink-soft); margin-top: 2px; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-entry-id { font-family: var(--mono); font-style: normal; font-weight: 600; color: var(--ink); }
 .op-entry-cell-label {
@@ -693,6 +696,23 @@ body { background: var(--paper); }
 .op-grade-badge.is-bgs { background: var(--navy); }
 .op-grade-badge.is-cgc { background: var(--jade); }
 .op-grade-badge.is-sgc { background: var(--rust); }
+
+/* ENTRY SORT */
+.op-entries-sort {
+  display: flex; align-items: center; gap: 10px;
+  margin: 14px 0 10px;
+}
+.op-entries-sort-label {
+  font-family: var(--mono); font-size: 9px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft);
+}
+.op-entries-sort select {
+  padding: 6px 12px;
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  font-family: var(--body); font-size: 12px; font-weight: 600;
+  color: var(--ink); cursor: pointer; outline: none;
+}
 
 /* COLLECTION MEMBERS PANEL */
 .op-members {
