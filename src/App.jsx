@@ -11,6 +11,23 @@ import {
   onVariantResolved, hydrateFromShared, subscribeResolutions,
 } from './grading.js';
 
+// Like useState, but persists to localStorage. `serialize`/`deserialize` are
+// optional escape hatches for non-JSON-friendly values (e.g. Sets).
+const useStoredState = (key, initial, opts = {}) => {
+  const { serialize = JSON.stringify, deserialize = JSON.parse } = opts;
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw != null) return deserialize(raw);
+    } catch {}
+    return typeof initial === 'function' ? initial() : initial;
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, serialize(value)); } catch {}
+  }, [key, value, serialize]);
+  return [value, setValue];
+};
+
 // All prices in the app come from PriceCharting. Raw = PC `loose-price`.
 // Returns 0 if the card's variant hasn't been resolved yet — viewport-based
 // lazy resolution will eventually populate it and components re-render via
@@ -516,7 +533,7 @@ function ModeIndicator() {
 // ============================================================================
 function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers = () => {} }) {
   const members = Array.isArray(collection?.members) ? collection.members : [];
-  const [entrySort, setEntrySort] = useState('recent');
+  const [entrySort, setEntrySort] = useStoredState('optcg:collection:entrySort', 'recent');
 
   // Effective market value for an entry — uses the entry's stored graded
   // price when present, otherwise falls back to the cached PriceCharting raw.
@@ -999,17 +1016,27 @@ function CardThumb({ card, size = 60 }) {
 
 // ============================================================================
 function SearchView({ catalog, onAddCard, onCardClick }) {
-  const [q, setQ] = useState('');
-  const [setFilter, setSetFilter] = useState('all');
-  const [filterDim, setFilterDim] = useState('none'); // 'none' | 'rarity' | 'color'
-  const [filterValue, setFilterValue] = useState('all');
-  const [sortBy, setSortBy] = useState('set'); // 'set' | 'name' | 'price-desc' | 'price-asc'
-  const [priceTier, setPriceTier] = useState('raw');
+  const [q, setQ] = useStoredState('optcg:search:q', '');
+  const [setFilter, setSetFilter] = useStoredState('optcg:search:setFilter', 'all');
+  const [filterDim, setFilterDim] = useStoredState('optcg:search:filterDim', 'none'); // 'none' | 'rarity' | 'color'
+  const [filterValue, setFilterValue] = useStoredState('optcg:search:filterValue', 'all');
+  const [sortBy, setSortBy] = useStoredState('optcg:search:sortBy', 'set'); // 'set' | 'name' | 'price-desc' | 'price-asc'
+  const [priceTier, setPriceTier] = useStoredState('optcg:search:priceTier', 'raw');
   // Hide filter: per-dimension Sets so multiple hides apply at once. `hideDim`
   // controls which dimension's pills are visible — the other dimensions stay
   // active in the background.
-  const [hideDim, setHideDim] = useState('none'); // 'none' | 'rarity' | 'color' | 'type'
-  const [hiddenByDim, setHiddenByDim] = useState({ rarity: new Set(), color: new Set(), type: new Set() });
+  const [hideDim, setHideDim] = useStoredState('optcg:search:hideDim', 'none'); // 'none' | 'rarity' | 'color' | 'type'
+  const [hiddenByDim, setHiddenByDim] = useStoredState(
+    'optcg:search:hiddenByDim',
+    () => ({ rarity: new Set(), color: new Set(), type: new Set() }),
+    {
+      serialize: (v) => JSON.stringify({ rarity: [...v.rarity], color: [...v.color], type: [...v.type] }),
+      deserialize: (s) => {
+        const o = JSON.parse(s);
+        return { rarity: new Set(o.rarity || []), color: new Set(o.color || []), type: new Set(o.type || []) };
+      },
+    }
+  );
 
   const currentHidden = hideDim !== 'none' ? hiddenByDim[hideDim] : null;
   const totalHidden = hiddenByDim.rarity.size + hiddenByDim.color.size + hiddenByDim.type.size;
