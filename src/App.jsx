@@ -7,9 +7,18 @@ import {
   fetchGradedPrice, isAggregateAcrossCompanies, hasToken,
   searchVariants, getSavedPick, savePick, priceFromProduct,
   getCachedImage, resolveEnhancedImage,
-  PRICE_TIERS, getCachedTierPrice, isVariantSnapshotFresh, resolveVariantSnapshot,
+  PRICE_TIERS, getCachedTierPrice, getCachedLoosePrice, isVariantSnapshotFresh, resolveVariantSnapshot,
   onVariantResolved, hydrateFromShared, subscribeResolutions,
 } from './grading.js';
+
+// All prices in the app come from PriceCharting. Raw = PC `loose-price`.
+// Returns 0 if the card's variant hasn't been resolved yet — viewport-based
+// lazy resolution will eventually populate it and components re-render via
+// the onVariantResolved emitter.
+const effectiveRawPrice = (card) => {
+  if (!card) return 0;
+  return getCachedLoosePrice(card.id) ?? 0;
+};
 
 // Dedup in-flight PriceCharting fetches across components in the same tick.
 const inFlightLookups = new Map();
@@ -21,7 +30,10 @@ const inFlightLookups = new Map();
 // is already present. variantTick increments when a variant is resolved so
 // consumers can re-read from the cache.
 const useEnhancedImage = (card, opts = {}) => {
-  const needsVariant = Boolean(opts.needsVariant);
+  // Prices in this app come from PriceCharting (loose-price, tier fields),
+  // so we always want a variant snapshot for any visible card. Image-only
+  // fetches are no longer enough — needsVariant defaults to true.
+  const needsVariant = opts.needsVariant !== false;
   const ref = useRef(null);
   const synchronousImage = card?.imageUrl || (card ? getCachedImage(card.id) : null);
   const needsImage = !synchronousImage;
@@ -152,6 +164,12 @@ export default function App() {
   // erratTick bumps whenever the user toggles a pre-errata mark so the
   // augmented catalog recomputes and twins appear/disappear in search.
   const [erratTick, setErratTick] = useState(0);
+
+  // variantRev increments whenever ANY card's PriceCharting variant snapshot
+  // lands in the cache. We use it as a useMemo dep so derived computations
+  // (collection stats, equity, sort orders) re-read fresh PC prices.
+  const [variantRev, setVariantRev] = useState(0);
+  useEffect(() => onVariantResolved(() => setVariantRev(r => r + 1)), []);
   const augmentedCatalog = useMemo(
     () => augmentWithErrata(catalog),
     // erratTick is read inside augmentWithErrata via readErrataSet()
@@ -270,6 +288,7 @@ export default function App() {
             collection={activeCollection}
             entries={activeEntries}
             catalogIndex={catalogIndex}
+            variantRev={variantRev}
             onSearchClick={() => setView('search')}
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
@@ -453,7 +472,7 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {} }) {
+function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {} }) {
   const stats = useMemo(() => {
     let totalPaid = 0, totalMarket = 0, gradedCount = 0;
     for (const e of entries) {
@@ -463,11 +482,12 @@ function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCa
         gradedCount += 1;
       } else {
         const card = catalogIndex.get(e.card_id);
-        if (card) totalMarket += card.marketPrice || 0;
+        if (card) totalMarket += effectiveRawPrice(card);
       }
     }
     return { totalPaid, totalMarket, count: entries.length, gradedCount };
-  }, [entries, catalogIndex]);
+    // variantRev forces recompute when PC variant snapshots land
+  }, [entries, catalogIndex, variantRev]);
 
   const profit = stats.totalMarket - stats.totalPaid;
   const profitPct = stats.totalPaid > 0 ? (profit / stats.totalPaid) * 100 : 0;
@@ -521,7 +541,7 @@ function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCa
               }
               const marketValue = entry.grading_company && Number(entry.graded_price) > 0
                 ? Number(entry.graded_price)
-                : (card.marketPrice || 0);
+                : effectiveRawPrice(card);
               const delta = marketValue - (Number(entry.purchase_price) || 0);
               return (
                 <EntryRow
@@ -613,7 +633,7 @@ function EquityPanel({ entries, catalogIndex, totalMarket }) {
     for (const entry of sorted) {
       const unitPrice = totalUnits > 0 && nav > 0 ? nav / totalUnits : 1;
       const card = catalogIndex.get(entry.card_id);
-      const cardMarketAtCurrent = card?.marketPrice || 0;
+      const cardMarketAtCurrent = effectiveRawPrice(card);
       let entryCash = 0;
       for (const c of expandContribs(entry)) {
         const amt = Number(c.amount) || 0;
@@ -863,8 +883,8 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
   const sorted = useMemo(() => {
     const arr = [...filtered];
     if (sortBy === 'name') arr.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    else if (sortBy === 'price-desc') arr.sort((a, b) => (b.marketPrice || 0) - (a.marketPrice || 0));
-    else if (sortBy === 'price-asc') arr.sort((a, b) => (a.marketPrice || 0) - (b.marketPrice || 0));
+    else if (sortBy === 'price-desc') arr.sort((a, b) => effectiveRawPrice(b) - effectiveRawPrice(a));
+    else if (sortBy === 'price-asc') arr.sort((a, b) => effectiveRawPrice(a) - effectiveRawPrice(b));
     else arr.sort((a, b) => {
       if (a.setId !== b.setId) return compareSets(a, b);
       return (a.id || '').localeCompare(b.id || '');
@@ -1314,7 +1334,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                 <VariantPill variant={currentCard.variant} />
               </div>
               <div className="op-resolve-sub">
-                {RARITY_LABELS[currentCard.rarity] || currentCard.rarity} · OPTCGAPI raw: ${(currentCard.marketPrice || 0).toFixed(2)}
+                {RARITY_LABELS[currentCard.rarity] || currentCard.rarity} · Raw: ${effectiveRawPrice(currentCard).toFixed(2)}
               </div>
 
               <Field label="PriceCharting variant">
@@ -1415,7 +1435,7 @@ function CardTile({ card, onAddCard, onCardClick, priceTier = 'raw' }) {
           </div>
           <div className="op-card-tile-price">
             <span className="op-card-tile-price-label">Raw</span>
-            <span className="op-card-tile-price-val">${(card.marketPrice || 0).toFixed(2)}</span>
+            <span className="op-card-tile-price-val">${effectiveRawPrice(card).toFixed(2)}</span>
           </div>
           {showTier && (
             <div className="op-card-tile-price op-card-tile-price-tier">
@@ -1630,7 +1650,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
             </div>
             <div className="op-modal-sub">{card.displayId || card.id} · {card.setName} · {RARITY_LABELS[card.rarity] || card.rarity}</div>
             <div className="op-modal-market">
-              Market: <strong>${(card.marketPrice || 0).toFixed(2)}</strong>
+              Market: <strong>${effectiveRawPrice(card).toFixed(2)}</strong>
               {card.inventoryPrice > 0 && <> · Inventory: <strong>${card.inventoryPrice.toFixed(2)}</strong></>}
             </div>
           </div>
@@ -1881,7 +1901,7 @@ function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollecti
 
         <div className="op-drawer-body">
           <div className="op-price-grid">
-            <PriceCell label="Market" value={`$${(card.marketPrice || 0).toFixed(2)}`} accent />
+            <PriceCell label="Market" value={`$${effectiveRawPrice(card).toFixed(2)}`} accent />
             <PriceCell label="Inventory" value={`$${(card.inventoryPrice || 0).toFixed(2)}`} />
             <PriceCell
               label="14d trend"

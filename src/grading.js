@@ -222,6 +222,17 @@ export const getCachedTierPrice = (cardId, tier) => {
   return pennies > 0 ? pennies / 100 : null;
 };
 
+// Cached raw / loose (ungraded) market price from PriceCharting, in USD.
+// Returns null if no variant snapshot has been resolved for this card yet —
+// the caller may show 0 / "—" until the lazy resolution lands.
+export const getCachedLoosePrice = (cardId) => {
+  const cache = readCache(VARIANT_CACHE_KEY, {});
+  const snap = cache[cardId];
+  if (!snap) return null;
+  const pennies = Number(snap['loose-price']) || 0;
+  return pennies > 0 ? pennies / 100 : null;
+};
+
 // True if we have a variant snapshot for this card (regardless of staleness).
 export const hasCachedVariant = (cardId) => {
   const cache = readCache(VARIANT_CACHE_KEY, {});
