@@ -966,22 +966,20 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, on
           <div className="op-entry-cardname">
             <span className="op-entry-cardname-text">{card.name}</span>
             <VariantPill variant={card.variant} />
-            {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} />}
+            {isGraded
+              ? <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} />
+              : <RawBadge condition={entry.condition} />}
           </div>
           <div className="op-entry-cardset">
             <span className="op-entry-id">{card.displayId || card.id}</span> · {card.setName} · {RARITY_LABELS[card.rarity] || card.rarity}
           </div>
         </div>
         <div className="op-entry-cell">
-          <div className="op-entry-cell-label">{isGraded ? 'Grade' : 'Condition'}</div>
-          <div className="op-entry-cell-val">{isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? ' Black' : ''}` : (entry.condition || '—')}</div>
-        </div>
-        <div className="op-entry-cell">
           <div className="op-entry-cell-label">Paid</div>
           <div className="op-entry-cell-val">${Number(entry.purchase_price || 0).toFixed(2)}</div>
         </div>
         <div className="op-entry-cell">
-          <div className="op-entry-cell-label">{isGraded ? 'Graded' : 'Market'}</div>
+          <div className="op-entry-cell-label">Market</div>
           <div className="op-entry-cell-val">${(marketValue || 0).toFixed(2)}</div>
         </div>
         <div className={`op-entry-delta ${delta >= 0 ? 'is-pos' : 'is-neg'}`}>
@@ -1009,6 +1007,20 @@ function GradingBadge({ company, grade, bgsBlack }) {
     <span className={`op-grade-badge is-${classKey}`} title={bgsBlack ? `${company} ${grade} Black Label (Perfect 10)` : `${company} ${grade}`}>
       <Award size={11} />
       {label}
+    </span>
+  );
+}
+
+// Compact condition labels for the raw badge (don't blow up the chip width).
+const CONDITION_ABBR = {
+  'Mint': 'M', 'Near Mint': 'NM', 'Lightly Played': 'LP',
+  'Moderately Played': 'MP', 'Heavily Played': 'HP', 'Damaged': 'DMG',
+};
+function RawBadge({ condition }) {
+  const cond = condition && CONDITION_ABBR[condition] ? CONDITION_ABBR[condition] : null;
+  return (
+    <span className="op-grade-badge is-raw" title={condition ? `Raw · ${condition}` : 'Raw / Ungraded'}>
+      Raw{cond ? ` ${cond}` : ''}
     </span>
   );
 }
@@ -2032,8 +2044,11 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
             </div>
             <div className="op-modal-sub">{card.displayId || card.id} · {card.setName} · {RARITY_LABELS[card.rarity] || card.rarity}</div>
             <div className="op-modal-market">
-              Market: <strong>${effectiveRawPrice(card).toFixed(2)}</strong>
-              {card.inventoryPrice > 0 && <> · Inventory: <strong>${card.inventoryPrice.toFixed(2)}</strong></>}
+              Raw: <strong>${effectiveRawPrice(card).toFixed(2)}</strong>
+              {(() => {
+                const p = getCachedTierPrice(card.id, 'psa10');
+                return p != null ? <> · PSA 10: <strong>${p.toFixed(2)}</strong></> : null;
+              })()}
             </div>
           </div>
         </div>
@@ -2283,8 +2298,14 @@ function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollecti
 
         <div className="op-drawer-body">
           <div className="op-price-grid">
-            <PriceCell label="Market" value={`$${effectiveRawPrice(card).toFixed(2)}`} accent />
-            <PriceCell label="Inventory" value={`$${(card.inventoryPrice || 0).toFixed(2)}`} />
+            <PriceCell label="Raw" value={`$${effectiveRawPrice(card).toFixed(2)}`} accent />
+            <PriceCell
+              label="PSA 10"
+              value={(() => {
+                const p = getCachedTierPrice(card.id, 'psa10');
+                return p != null ? `$${p.toFixed(2)}` : '—';
+              })()}
+            />
             <PriceCell
               label="14d trend"
               value={historyLoading ? '…' : `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}%`}

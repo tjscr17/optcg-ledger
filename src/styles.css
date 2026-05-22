@@ -697,6 +697,8 @@ body { background: var(--paper); }
 .op-grade-badge.is-bgs-black { background: #0a0a0a; color: var(--gold); border: 1px solid var(--gold); }
 .op-grade-badge.is-cgc { background: var(--jade); }
 .op-grade-badge.is-sgc { background: var(--rust); }
+.op-grade-badge.is-raw { background: var(--paper-warm); color: var(--ink-soft); border: 1px solid var(--line-strong); }
+.op-grade-badge.is-raw > svg { display: none; }
 
 /* COLLECTION SEARCH (inline variant of the search bar) */
 .op-search-bar-inline { margin: 14px 0 6px; }
