@@ -694,6 +694,16 @@ body { background: var(--paper); }
 .op-grade-badge.is-cgc { background: var(--jade); }
 .op-grade-badge.is-sgc { background: var(--rust); }
 
+/* INLINE COLLECTION NAME EDIT */
+.op-collection-item-input {
+  flex: 1; min-width: 0;
+  padding: 6px 10px;
+  background: var(--paper-warm);
+  border: 1px solid var(--gold);
+  font-family: var(--display); font-weight: 600; font-size: 14px;
+  color: var(--ink); outline: none;
+}
+
 /* TRANSACTIONS VIEW + SELL BUTTON */
 .op-entry-sell:hover { background: var(--jade); color: var(--paper); border-color: var(--jade); }
 

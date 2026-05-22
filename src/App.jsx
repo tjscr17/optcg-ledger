@@ -188,6 +188,11 @@ export default function App() {
     if (created) setCollections([...collections, created]);
   };
 
+  const renameCollection = async (id, name) => {
+    const updated = await store.update('collections', id, { name });
+    if (updated) setCollections(collections.map(c => c.id === id ? updated : c));
+  };
+
   const deleteCollection = async (id) => {
     if (collections.length <= 1) return;
     if (!confirm('Delete this collection and all its entries? This cannot be undone.')) return;
@@ -273,7 +278,7 @@ export default function App() {
         view={view} setView={setView}
         collections={collections}
         activeCollectionId={activeCollectionId} setActiveCollectionId={setActiveCollectionId}
-        addCollection={addCollection} deleteCollection={deleteCollection}
+        addCollection={addCollection} deleteCollection={deleteCollection} renameCollection={renameCollection}
       />
 
       {catalogError && (
@@ -381,10 +386,23 @@ export default function App() {
 }
 
 // ============================================================================
-function Header({ view, setView, collections, activeCollectionId, setActiveCollectionId, addCollection, deleteCollection }) {
+function Header({ view, setView, collections, activeCollectionId, setActiveCollectionId, addCollection, deleteCollection, renameCollection }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [newColName, setNewColName] = useState('');
+  const [editingId, setEditingId] = useState(null);
+  const [editingName, setEditingName] = useState('');
   const menuRef = useRef(null);
+
+  const startEdit = (c) => { setEditingId(c.id); setEditingName(c.name); };
+  const commitEdit = async () => {
+    const next = editingName.trim();
+    if (next && editingId) {
+      const current = collections.find(c => c.id === editingId);
+      if (current && current.name !== next) await renameCollection(editingId, next);
+    }
+    setEditingId(null);
+    setEditingName('');
+  };
 
   useEffect(() => {
     const onClick = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
@@ -429,8 +447,25 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
           <div className="op-collection-menu">
             {collections.map(c => (
               <div key={c.id} className={`op-collection-item ${c.id === activeCollectionId ? 'is-active' : ''}`}>
-                <button className="op-collection-item-btn" onClick={() => { setActiveCollectionId(c.id); setMenuOpen(false); }}>
-                  {c.name}
+                {editingId === c.id ? (
+                  <input
+                    autoFocus
+                    className="op-collection-item-input"
+                    value={editingName}
+                    onChange={(e) => setEditingName(e.target.value)}
+                    onBlur={commitEdit}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitEdit();
+                      if (e.key === 'Escape') { setEditingId(null); setEditingName(''); }
+                    }}
+                  />
+                ) : (
+                  <button className="op-collection-item-btn" onClick={() => { setActiveCollectionId(c.id); setMenuOpen(false); }}>
+                    {c.name}
+                  </button>
+                )}
+                <button className="op-collection-del" onClick={() => startEdit(c)} title="Rename collection">
+                  <Pencil size={13} />
                 </button>
                 {collections.length > 1 && (
                   <button className="op-collection-del" onClick={() => deleteCollection(c.id)} title="Delete collection">
