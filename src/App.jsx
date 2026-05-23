@@ -348,6 +348,14 @@ export default function App() {
           <TransactionsView
             transactions={transactions}
             collections={collections}
+            entries={entries}
+            catalogIndex={catalogIndex}
+            variantRev={variantRev}
+            activeCollectionId={activeCollectionId}
+            onLogTransaction={async (tx) => {
+              const created = await store.insert('transactions', { id: uid(), ...tx, created_at: new Date().toISOString() });
+              if (created) setTransactions(prev => [...prev, created]);
+            }}
           />
         )}
       </main>
@@ -447,14 +455,14 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
       </div>
 
       <nav className="op-nav">
+        <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
+          <RefreshCw size={15} /> Resolve
+        </button>
         <button className={`op-nav-btn ${view === 'collection' ? 'is-active' : ''}`} onClick={() => setView('collection')}>
           <Folder size={15} /> Collection
         </button>
         <button className={`op-nav-btn ${view === 'search' ? 'is-active' : ''}`} onClick={() => setView('search')}>
           <Search size={15} /> Search
-        </button>
-        <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
-          <RefreshCw size={15} /> Resolve
         </button>
         <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
           <BarChart3 size={15} /> Transactions
@@ -645,8 +653,6 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
         </div>
       ) : (
         <>
-          <EquityPanel entries={entries} catalogIndex={catalogIndex} totalMarket={stats.totalMarket} />
-
           <div className="op-search-bar op-search-bar-inline">
             <Search size={16} className="op-search-icon" />
             <input
@@ -732,81 +738,155 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
 //
 // Entries without a `contributions` array fall back to a single contribution
 // of `purchase_price` attributed to `owner_name` (or "Unattributed").
-function EquityPanel({ entries, catalogIndex, totalMarket }) {
+function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, collectionId }) {
   const [mode, setMode] = useState('capital');
 
   const equity = useMemo(() => {
-    const expandContribs = (entry) => {
-      if (entry.contributions && entry.contributions.length > 0) return entry.contributions;
-      const amount = Number(entry.purchase_price) || 0;
-      if (amount <= 0) return [];
-      return [{ name: 'Unattributed', amount }];
+    // Build a per-tx signed contribution iterator. Sign convention:
+    //   buy / expense: contributors put money in (positive = money in)
+    //   sell:          contributors took proceeds out (positive = money out)
+    //   transfer:      contributions are already signed (negative = sender, positive = receiver)
+    const signedContribsOf = (tx) => {
+      const list = Array.isArray(tx.contributions) ? tx.contributions : [];
+      return list.flatMap(c => {
+        const amt = Number(c.amount) || 0;
+        if (!c.name || amt === 0) return [];
+        if (tx.type === 'sell') return [{ name: c.name.trim(), amount: -Math.abs(amt) }];
+        if (tx.type === 'transfer') return [{ name: c.name.trim(), amount: amt }];
+        // buy / expense (and anything else): positive amount means money in.
+        return [{ name: c.name.trim(), amount: amt }];
+      });
     };
+
+    // Legacy entries that pre-date the transaction log have contributions on
+    // the entry itself but no matching buy tx. Detect & include them so old
+    // data doesn't vanish from the equity panel.
+    const scopedTxs = collectionId
+      ? transactions.filter(t => t.collection_id === collectionId)
+      : transactions;
+    const buyTxKeys = new Set(
+      scopedTxs.filter(t => t.type === 'buy').map(t => `${t.card_id}|${(t.occurred_at || t.created_at || '').slice(0, 10)}`)
+    );
+    const legacyBuyContribs = entries
+      .filter(e => {
+        if (collectionId && e.collection_id !== collectionId) return false;
+        if (!Array.isArray(e.contributions) || e.contributions.length === 0) return false;
+        const key = `${e.card_id}|${(e.acquired_at || e.added_at || '').slice(0, 10)}`;
+        return !buyTxKeys.has(key);
+      })
+      .flatMap(e => e.contributions.map(c => ({
+        name: c.name?.trim() || 'Unattributed',
+        amount: Number(c.amount) || 0,
+        date: e.acquired_at || (e.added_at || '').slice(0, 10),
+      })).filter(c => c.amount > 0));
 
     if (mode === 'capital') {
       const totals = new Map();
-      let totalPaid = 0;
-      for (const entry of entries) {
-        for (const c of expandContribs(entry)) {
-          const amt = Number(c.amount) || 0;
-          if (!c.name || amt <= 0) continue;
-          totals.set(c.name, (totals.get(c.name) || 0) + amt);
-          totalPaid += amt;
+      const gross = new Map(); // gross in (positive contributions only) for "Contributed" column
+      for (const tx of scopedTxs) {
+        for (const c of signedContribsOf(tx)) {
+          totals.set(c.name, (totals.get(c.name) || 0) + c.amount);
+          if (c.amount > 0) gross.set(c.name, (gross.get(c.name) || 0) + c.amount);
         }
       }
-      return {
-        rows: Array.from(totals.entries()).map(([name, paid]) => ({
+      for (const c of legacyBuyContribs) {
+        totals.set(c.name, (totals.get(c.name) || 0) + c.amount);
+        gross.set(c.name, (gross.get(c.name) || 0) + c.amount);
+      }
+
+      // Equity % uses positive net only; members in the red get 0%.
+      const positiveNets = Array.from(totals.values()).filter(v => v > 0);
+      const positiveSum = positiveNets.reduce((s, v) => s + v, 0);
+
+      const rows = Array.from(totals.entries())
+        .filter(([name, net]) => name && (net !== 0 || gross.get(name)))
+        .map(([name, net]) => ({
           name,
-          paid,
+          paid: gross.get(name) || 0,
+          net,
           units: null,
-          pct: totalPaid > 0 ? paid / totalPaid : 0,
-          value: totalPaid > 0 ? totalMarket * (paid / totalPaid) : 0,
-        })).sort((a, b) => b.paid - a.paid),
-        totalPaid,
-        totalUnits: null,
-      };
+          pct: net > 0 && positiveSum > 0 ? net / positiveSum : 0,
+          value: net > 0 && positiveSum > 0 ? totalMarket * (net / positiveSum) : 0,
+        }))
+        .sort((a, b) => b.net - a.net);
+      const totalPaid = Array.from(gross.values()).reduce((s, v) => s + v, 0);
+
+      return { rows, totalPaid, totalUnits: null };
     }
 
-    // Time-weighted: walk entries in date order, issue units against NAV.
-    // Prefer the user-supplied acquired_at; fall back to the row's added_at.
-    const dateOf = (e) => e.acquired_at || (e.added_at || '').slice(0, 10);
-    const sorted = [...entries].sort((a, b) => dateOf(a).localeCompare(dateOf(b)));
+    // Time-weighted: fund-accounting units. Walk transactions chronologically.
+    //   buy / expense: cash in → issue units to contributors at current unit price.
+    //                  NAV grows by their cash; for buys, also bump NAV by any
+    //                  card-market premium over what was paid (deal upside).
+    //   sell:          cash out → redeem units from each recipient at current
+    //                  unit price. NAV shrinks by the cash distributed.
+    //   transfer:      no NAV change. Sender's units are redeemed and reissued
+    //                  to receiver at current unit price (zero-sum).
+    // Legacy entries (no buy tx) are treated as a synthetic buy tx in date order.
+    const dateOfTx = (t) => (t.occurred_at || t.created_at || '').slice(0, 10);
+    const events = [
+      ...scopedTxs.map(t => ({ kind: t.type, date: dateOfTx(t), tx: t })),
+      ...legacyBuyContribs.length > 0
+        ? entries
+            .filter(e => {
+              if (collectionId && e.collection_id !== collectionId) return false;
+              if (!Array.isArray(e.contributions) || e.contributions.length === 0) return false;
+              const key = `${e.card_id}|${(e.acquired_at || e.added_at || '').slice(0, 10)}`;
+              return !buyTxKeys.has(key);
+            })
+            .map(e => ({
+              kind: 'buy',
+              date: e.acquired_at || (e.added_at || '').slice(0, 10),
+              tx: { type: 'buy', card_id: e.card_id, contributions: e.contributions, amount: Number(e.purchase_price) || 0 },
+            }))
+        : [],
+    ].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
     const units = new Map();
-    const paidMap = new Map();
+    const grossIn = new Map();
     let totalUnits = 0;
     let nav = 0;
-    for (const entry of sorted) {
-      const unitPrice = totalUnits > 0 && nav > 0 ? nav / totalUnits : 1;
-      const card = catalogIndex.get(entry.card_id);
-      const cardMarketAtCurrent = effectiveRawPrice(card);
-      let entryCash = 0;
-      for (const c of expandContribs(entry)) {
-        const amt = Number(c.amount) || 0;
-        if (!c.name || amt <= 0) continue;
-        const issued = amt / unitPrice;
-        units.set(c.name, (units.get(c.name) || 0) + issued);
-        paidMap.set(c.name, (paidMap.get(c.name) || 0) + amt);
-        totalUnits += issued;
-        entryCash += amt;
-      }
-      // NAV advances by the cash put in (we approximate by replacing the cash
-      // with the card's current market value — if we got a deal, this gives
-      // existing unitholders some immediate upside).
-      nav += entryCash;
-      nav += Math.max(0, cardMarketAtCurrent - entryCash);
-    }
-    return {
-      rows: Array.from(units.entries()).map(([name, u]) => ({
-        name,
-        paid: paidMap.get(name) || 0,
-        units: u,
-        pct: totalUnits > 0 ? u / totalUnits : 0,
-        value: totalUnits > 0 ? totalMarket * (u / totalUnits) : 0,
-      })).sort((a, b) => b.units - a.units),
-      totalPaid: Array.from(paidMap.values()).reduce((s, v) => s + v, 0),
-      totalUnits,
+
+    const currentNavOfCard = (cardId) => {
+      const c = catalogIndex.get(cardId);
+      return c ? effectiveRawPrice(c) : 0;
     };
-  }, [entries, catalogIndex, totalMarket, mode]);
+
+    for (const ev of events) {
+      const t = ev.tx;
+      const unitPrice = totalUnits > 0 && nav > 0 ? nav / totalUnits : 1;
+      for (const c of signedContribsOf(t)) {
+        if (c.amount === 0) continue;
+        const issued = c.amount / unitPrice;
+        units.set(c.name, (units.get(c.name) || 0) + issued);
+        totalUnits += issued;
+        if (c.amount > 0) grossIn.set(c.name, (grossIn.get(c.name) || 0) + c.amount);
+        nav += c.amount; // signed cash flow into the pool
+      }
+      // For buys, give existing unitholders any instant gain from acquiring a
+      // card whose market exceeds what we paid.
+      if (ev.kind === 'buy') {
+        const market = currentNavOfCard(t.card_id);
+        const paid = Number(t.amount) || 0;
+        const bonus = Math.max(0, market - paid);
+        if (bonus > 0) nav += bonus;
+      }
+    }
+
+    const positiveUnits = Array.from(units.values()).filter(v => v > 0).reduce((s, v) => s + v, 0);
+    const rows = Array.from(units.entries())
+      .filter(([name, u]) => name && (u !== 0 || grossIn.get(name)))
+      .map(([name, u]) => ({
+        name,
+        paid: grossIn.get(name) || 0,
+        net: grossIn.get(name) || 0,
+        units: u,
+        pct: u > 0 && positiveUnits > 0 ? u / positiveUnits : 0,
+        value: u > 0 && positiveUnits > 0 ? totalMarket * (u / positiveUnits) : 0,
+      }))
+      .sort((a, b) => b.units - a.units);
+    return { rows, totalPaid: Array.from(grossIn.values()).reduce((s, v) => s + v, 0), totalUnits: positiveUnits };
+  }, [entries, transactions, catalogIndex, totalMarket, mode, collectionId]);
 
   if (equity.rows.length === 0) return null;
 
@@ -818,8 +898,8 @@ function EquityPanel({ entries, catalogIndex, totalMarket }) {
           <h2 className="op-equity-title">Capital &amp; ownership</h2>
           <div className="op-equity-sub">
             {mode === 'capital'
-              ? 'Equity allocated by capital contributed. Ignores market and timing.'
-              : 'Equity allocated by fund-accounting units. Earlier contributions to an appreciating collection get a bigger slice.'}
+              ? 'Net per-member capital across buys, sells, transfers, and expenses. Ignores market timing.'
+              : 'Fund-accounting units. Earlier net contributions to an appreciating pool get a bigger slice.'}
           </div>
         </div>
         <div className="op-equity-mode">
@@ -831,18 +911,25 @@ function EquityPanel({ entries, catalogIndex, totalMarket }) {
       <div className="op-equity-table">
         <div className="op-equity-row op-equity-header-row">
           <div>Member</div>
-          <div className="op-equity-num">Contributed</div>
+          <div className="op-equity-num">Gross in</div>
+          {mode === 'capital' && <div className="op-equity-num">Net</div>}
           {mode === 'time-weighted' && <div className="op-equity-num">Units</div>}
           <div className="op-equity-num">Equity %</div>
           <div className="op-equity-num">Stake value</div>
           <div className="op-equity-num">Gain</div>
         </div>
         {equity.rows.map(r => {
-          const gain = r.value - r.paid;
+          const net = r.net != null ? r.net : r.paid;
+          const gain = r.value - net;
           return (
             <div key={r.name} className="op-equity-row">
               <div className="op-equity-name">{r.name}</div>
               <div className="op-equity-num">${r.paid.toFixed(2)}</div>
+              {mode === 'capital' && (
+                <div className={`op-equity-num ${net >= 0 ? '' : 'is-neg'}`}>
+                  {net >= 0 ? '' : '−'}${Math.abs(net).toFixed(2)}
+                </div>
+              )}
               {mode === 'time-weighted' && <div className="op-equity-num">{(r.units || 0).toFixed(2)}</div>}
               <div className="op-equity-num">{(r.pct * 100).toFixed(1)}%</div>
               <div className="op-equity-num">${r.value.toFixed(2)}</div>
@@ -855,6 +942,11 @@ function EquityPanel({ entries, catalogIndex, totalMarket }) {
         <div className="op-equity-row op-equity-total-row">
           <div>Total</div>
           <div className="op-equity-num">${equity.totalPaid.toFixed(2)}</div>
+          {mode === 'capital' && (
+            <div className="op-equity-num">
+              ${equity.rows.reduce((s, r) => s + (r.net != null ? r.net : r.paid), 0).toFixed(2)}
+            </div>
+          )}
           {mode === 'time-weighted' && <div className="op-equity-num">{(equity.totalUnits || 0).toFixed(2)}</div>}
           <div className="op-equity-num">100.0%</div>
           <div className="op-equity-num">${totalMarket.toFixed(2)}</div>
@@ -1429,15 +1521,224 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
 }
 
 // ============================================================================
-function TransactionsView({ transactions, collections }) {
-  const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell'
+function TransferModal({ members = [], collection, onClose, onSave }) {
+  const [fromName, setFromName] = useState(members[0] || '');
+  const [toName, setToName] = useState(members[1] || '');
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const amt = Number(amount) || 0;
+  const valid = fromName.trim() && toName.trim() && fromName !== toName && amt > 0;
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave({
+      collection_id: collection?.id || null,
+      card_id: null,
+      card_display_name: `Transfer · ${fromName} → ${toName}`,
+      type: 'transfer',
+      amount: amt,
+      contributions: [
+        { name: fromName.trim(), amount: -amt },
+        { name: toName.trim(), amount: amt },
+      ],
+      occurred_at: date || null,
+      notes: notes.trim(),
+    });
+    setSaving(false);
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Logging cash transfer</div>
+            <div className="op-modal-title">Cash between members</div>
+            <div className="op-modal-sub">{collection?.name || 'Unscoped'}</div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          <div className="op-form-row">
+            <Field label="From">
+              {members.length > 0 ? (
+                <select value={fromName} onChange={(e) => setFromName(e.target.value)}>
+                  <option value="">— Pick —</option>
+                  {members.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              ) : (
+                <input value={fromName} onChange={(e) => setFromName(e.target.value)} placeholder="Name" />
+              )}
+            </Field>
+            <Field label="To">
+              {members.length > 0 ? (
+                <select value={toName} onChange={(e) => setToName(e.target.value)}>
+                  <option value="">— Pick —</option>
+                  {members.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              ) : (
+                <input value={toName} onChange={(e) => setToName(e.target.value)} placeholder="Name" />
+              )}
+            </Field>
+          </div>
+          <div className="op-form-row">
+            <Field label="Amount (USD)">
+              <input type="number" step="0.01" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
+            </Field>
+            <Field label="Date">
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Notes (optional)">
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Venmo, cash, reason for transfer…" />
+          </Field>
+          <div className="op-form-actions">
+            <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={saving || !valid}>
+              {saving ? 'Saving…' : 'Record transfer'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+function ExpenseModal({ members = [], collection, onClose, onSave }) {
+  const [description, setDescription] = useState('');
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [contributions, setContributions] = useState([]);
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const addRow = () => setContributions([...contributions, { name: '', amount: '' }]);
+  const updateRow = (i, patch) => setContributions(contributions.map((c, idx) => idx === i ? { ...c, ...patch } : c));
+  const removeRow = (i) => setContributions(contributions.filter((_, idx) => idx !== i));
+
+  const amt = Number(amount) || 0;
+  const splitTotal = contributions.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const splitMismatch = contributions.length > 0 && Math.abs(splitTotal - amt) > 0.01;
+  const valid = description.trim() && amt > 0;
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave({
+      collection_id: collection?.id || null,
+      card_id: null,
+      card_display_name: description.trim() || 'Expense',
+      type: 'expense',
+      amount: amt,
+      contributions: contributions.filter(c => c.name.trim() && Number(c.amount) > 0).map(c => ({ name: c.name.trim(), amount: Number(c.amount) })),
+      occurred_at: date || null,
+      notes: notes.trim(),
+    });
+    setSaving(false);
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Logging expense</div>
+            <div className="op-modal-title">Pool expense</div>
+            <div className="op-modal-sub">{collection?.name || 'Unscoped'} · sleeves, grading fees, shipping, etc.</div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          <div className="op-form-row">
+            <Field label="Description">
+              <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. PSA bulk grading submission" autoFocus />
+            </Field>
+            <Field label="Date">
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Total (USD)">
+            <input type="number" step="0.01" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          </Field>
+
+          <div className="op-form-section">
+            <div className="op-form-section-head">
+              <div>
+                <div className="op-form-section-title">Who paid</div>
+                <div className="op-form-section-sub">Split between members. Leave empty if one person fronted everything.</div>
+              </div>
+              <button className="op-btn-ghost" onClick={addRow}>
+                <Plus size={14} /> Add split
+              </button>
+            </div>
+            {contributions.map((c, i) => (
+              <ContribRow
+                key={i}
+                value={c}
+                members={members}
+                onChange={(patch) => updateRow(i, patch)}
+                onRemove={() => removeRow(i)}
+              />
+            ))}
+            {contributions.length > 0 && (
+              <div className={`op-contrib-check ${splitMismatch ? 'is-warn' : 'is-ok'}`}>
+                Splits total: <strong>${splitTotal.toFixed(2)}</strong> of <strong>${amt.toFixed(2)}</strong>
+                {splitMismatch && <span> · doesn't match expense total</span>}
+              </div>
+            )}
+          </div>
+
+          <Field label="Notes (optional)">
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </Field>
+          <div className="op-form-actions">
+            <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={saving || !valid}>
+              {saving ? 'Saving…' : 'Record expense'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+function TransactionsView({ transactions, collections, entries = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {} }) {
+  const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
   const [collectionFilter, setCollectionFilter] = useState('all');
+  const [modal, setModal] = useState(null); // 'transfer' | 'expense' | null
 
   const collectionsById = useMemo(() => {
     const m = new Map();
     for (const c of collections) m.set(c.id, c);
     return m;
   }, [collections]);
+
+  const activeCollection = collectionsById.get(activeCollectionId) || collections[0];
+  const equityEntries = useMemo(
+    () => entries.filter(e => !collectionFilter || collectionFilter === 'all' ? e.collection_id === (activeCollection?.id) : e.collection_id === collectionFilter),
+    [entries, collectionFilter, activeCollection]
+  );
+
+  // Effective NAV across the entries the equity panel uses.
+  const equityNav = useMemo(() => {
+    let nav = 0;
+    for (const e of equityEntries) {
+      if (e.grading_company && Number(e.graded_price) > 0) nav += Number(e.graded_price);
+      else {
+        const c = catalogIndex.get(e.card_id);
+        if (c) nav += effectiveRawPrice(c);
+      }
+    }
+    return nav;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [equityEntries, catalogIndex, variantRev]);
 
   const filtered = useMemo(() => {
     return transactions
@@ -1451,13 +1752,17 @@ function TransactionsView({ transactions, collections }) {
   }, [transactions, typeFilter, collectionFilter]);
 
   const totals = useMemo(() => {
-    let bought = 0, sold = 0;
+    let bought = 0, sold = 0, expenses = 0;
     for (const t of filtered) {
       if (t.type === 'buy') bought += Number(t.amount) || 0;
       if (t.type === 'sell') sold += Number(t.amount) || 0;
+      if (t.type === 'expense') expenses += Number(t.amount) || 0;
     }
-    return { bought, sold, net: sold - bought };
+    return { bought, sold, expenses, net: sold - bought - expenses };
   }, [filtered]);
+
+  const equityCollection = collectionFilter !== 'all' ? collectionsById.get(collectionFilter) : activeCollection;
+  const equityMembers = Array.isArray(equityCollection?.members) ? equityCollection.members : [];
 
   return (
     <div className="op-view">
@@ -1470,27 +1775,64 @@ function TransactionsView({ transactions, collections }) {
       </div>
 
       <div className="op-stats">
-        <Stat label="Bought (gross)" value={`$${totals.bought.toFixed(2)}`} />
-        <Stat label="Sold (gross)" value={`$${totals.sold.toFixed(2)}`} accent />
+        <Stat label="Bought" value={`$${totals.bought.toFixed(2)}`} />
+        <Stat label="Sold" value={`$${totals.sold.toFixed(2)}`} accent />
+        <Stat label="Expenses" value={`$${totals.expenses.toFixed(2)}`} />
         <Stat
-          label={totals.net >= 0 ? 'Net realized' : 'Net realized loss'}
+          label="Net cash flow"
           value={`${totals.net >= 0 ? '+' : ''}$${totals.net.toFixed(2)}`}
           tone={totals.net >= 0 ? 'pos' : 'neg'}
         />
-        <Stat label="Entries" value={filtered.length} />
       </div>
+
+      {equityCollection && (
+        <EquityPanel
+          entries={equityEntries}
+          transactions={transactions}
+          collectionId={equityCollection.id}
+          catalogIndex={catalogIndex}
+          totalMarket={equityNav}
+        />
+      )}
 
       <div className="op-filters">
         <FilterGroup label="Type" value={typeFilter} onChange={setTypeFilter} options={[
           { v: 'all', l: 'All' },
           { v: 'buy', l: 'Buys' },
           { v: 'sell', l: 'Sells' },
+          { v: 'transfer', l: 'Transfers' },
+          { v: 'expense', l: 'Expenses' },
         ]} />
         <FilterGroup label="Collection" value={collectionFilter} onChange={setCollectionFilter} mode="select" options={[
           { v: 'all', l: 'All collections' },
           ...collections.map(c => ({ v: c.id, l: c.name })),
         ]} />
+
+        <div className="op-filter-group">
+          <div className="op-filter-label">Log</div>
+          <div className="op-filter-pills">
+            <button className="op-filter-pill" onClick={() => setModal('transfer')}>+ Transfer</button>
+            <button className="op-filter-pill" onClick={() => setModal('expense')}>+ Expense</button>
+          </div>
+        </div>
       </div>
+
+      {modal === 'transfer' && (
+        <TransferModal
+          members={equityMembers}
+          collection={equityCollection}
+          onClose={() => setModal(null)}
+          onSave={async (payload) => { await onLogTransaction(payload); setModal(null); }}
+        />
+      )}
+      {modal === 'expense' && (
+        <ExpenseModal
+          members={equityMembers}
+          collection={equityCollection}
+          onClose={() => setModal(null)}
+          onSave={async (payload) => { await onLogTransaction(payload); setModal(null); }}
+        />
+      )}
 
       {filtered.length === 0 ? (
         <div className="op-empty">
@@ -1510,24 +1852,31 @@ function TransactionsView({ transactions, collections }) {
 }
 
 function TransactionRow({ tx, collection }) {
-  const isSell = tx.type === 'sell';
   const amount = Number(tx.amount) || 0;
+  // Visual style + sign per type
+  const meta = {
+    buy:      { label: 'BUY',      cls: 'is-buy',      tone: 'is-neg', sign: '−' },
+    sell:     { label: 'SELL',     cls: 'is-sell',     tone: 'is-pos', sign: '+' },
+    transfer: { label: 'TRANSFER', cls: 'is-transfer', tone: '',       sign: '' },
+    expense:  { label: 'EXPENSE',  cls: 'is-expense',  tone: 'is-neg', sign: '−' },
+  }[tx.type] || { label: (tx.type || '').toUpperCase(), cls: '', tone: '', sign: '' };
+
   return (
-    <div className={`op-tx-row ${isSell ? 'is-sell' : 'is-buy'}`}>
-      <div className="op-tx-type">{isSell ? 'SELL' : 'BUY'}</div>
+    <div className={`op-tx-row ${meta.cls}`}>
+      <div className="op-tx-type">{meta.label}</div>
       <div className="op-tx-main">
-        <div className="op-tx-card">{tx.card_display_name || tx.card_id}</div>
+        <div className="op-tx-card">{tx.card_display_name || tx.card_id || '(no description)'}</div>
         <div className="op-tx-meta">
           {collection?.name || '—'}
           {tx.occurred_at && <> · {tx.occurred_at}</>}
           {tx.contributions && tx.contributions.length > 0 && (
-            <> · {tx.contributions.map(c => `${c.name} $${Number(c.amount).toFixed(2)}`).join(', ')}</>
+            <> · {tx.contributions.map(c => `${c.name} ${Number(c.amount) >= 0 ? '+' : '−'}$${Math.abs(Number(c.amount)).toFixed(2)}`).join(', ')}</>
           )}
         </div>
         {tx.notes && <div className="op-tx-notes">{tx.notes}</div>}
       </div>
-      <div className={`op-tx-amount ${isSell ? 'is-pos' : 'is-neg'}`}>
-        {isSell ? '+' : '−'}${amount.toFixed(2)}
+      <div className={`op-tx-amount ${meta.tone}`}>
+        {meta.sign}${amount.toFixed(2)}
       </div>
     </div>
   );

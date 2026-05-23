@@ -775,6 +775,8 @@ body { background: var(--paper); }
 }
 .op-tx-row.is-buy { border-left-color: var(--berry); }
 .op-tx-row.is-sell { border-left-color: var(--jade); }
+.op-tx-row.is-transfer { border-left-color: var(--gold); }
+.op-tx-row.is-expense { border-left-color: var(--rust); }
 .op-tx-type {
   font-family: var(--mono); font-size: 10px; font-weight: 700;
   letter-spacing: 0.14em; color: var(--ink-soft);
