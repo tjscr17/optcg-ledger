@@ -578,7 +578,7 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
             {collections.length > 1 && (
               <div className={`op-collection-item op-collection-item-all ${activeCollectionId === 'all' ? 'is-active' : ''}`}>
                 <button className="op-collection-item-btn" onClick={() => { setActiveCollectionId('all'); setMenuOpen(false); }}>
-                  ★ All Collections <span className="op-collection-item-sub">aggregate across {collections.length}</span>
+                  ★ All Collections
                 </button>
               </div>
             )}
