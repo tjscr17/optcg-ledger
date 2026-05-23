@@ -260,7 +260,7 @@ body { background: var(--paper); }
 .op-entry-missing { padding: 14px 18px; align-items: center; justify-content: space-between; color: var(--ink-soft); font-style: italic; font-size: 13px; }
 .op-entry-main {
   flex: 1; display: grid;
-  grid-template-columns: auto 1fr 120px 130px 100px 100px 130px;
+  grid-template-columns: auto 1fr 110px 110px 130px;
   align-items: center; gap: 14px;
   padding: 10px 4px 10px 10px;
   background: transparent; border: none; cursor: pointer; text-align: left;
