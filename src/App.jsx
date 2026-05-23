@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
-import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil } from 'lucide-react';
+import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
 import { store, MODE, VAULT_LABEL } from './storage.js';
 import { loadCatalog, loadPriceHistory, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import {
@@ -116,6 +116,7 @@ export default function App() {
   const [collections, setCollections] = useState([]);
   const [entries, setEntries] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [watchlist, setWatchlist] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState('collection');
@@ -150,10 +151,11 @@ export default function App() {
 
   // Load user data
   const refreshData = useCallback(async () => {
-    const [cols, ents, txs] = await Promise.all([
+    const [cols, ents, txs, watches] = await Promise.all([
       store.list('collections'),
       store.list('entries'),
       store.list('transactions').catch(() => []),
+      store.list('watchlist').catch(() => []),
     ]);
     let cs = cols;
     if (cs.length === 0) {
@@ -163,6 +165,7 @@ export default function App() {
     setCollections(cs);
     setEntries(ents);
     setTransactions(txs);
+    setWatchlist(watches);
     setActiveCollectionId(prev => prev || cs[0]?.id || null);
   }, []);
 
@@ -175,7 +178,8 @@ export default function App() {
     const unsubC = store.subscribe('collections', refreshData);
     const unsubE = store.subscribe('entries', refreshData);
     const unsubT = store.subscribe('transactions', refreshData);
-    return () => { unsubC(); unsubE(); unsubT(); };
+    const unsubW = store.subscribe('watchlist', refreshData);
+    return () => { unsubC(); unsubE(); unsubT(); unsubW(); };
   }, [refreshData]);
 
   // erratTick bumps whenever the user toggles a pre-errata mark so the
@@ -271,6 +275,33 @@ export default function App() {
     setEntries(entries.filter(e => e.id !== id));
   };
 
+  const addToWatchlist = async (card, opts = {}) => {
+    if (watchlist.some(w => w.card_id === card.id)) return;
+    const created = await store.insert('watchlist', {
+      id: uid(),
+      card_id: card.id,
+      card_display_name: card.name ? `${card.displayId || card.id} ${card.name}` : (card.displayId || card.id),
+      target_price: opts.target_price ?? null,
+      notes: opts.notes || '',
+      last_checked_at: null,
+      last_seen_url: '',
+      last_seen_price: 0,
+      last_seen_source: '',
+      created_at: new Date().toISOString(),
+    });
+    if (created) setWatchlist(prev => [...prev, created]);
+  };
+
+  const updateWatchlistItem = async (id, patch) => {
+    const updated = await store.update('watchlist', id, patch);
+    if (updated) setWatchlist(watchlist.map(w => w.id === id ? updated : w));
+  };
+
+  const removeFromWatchlist = async (id) => {
+    await store.remove('watchlist', id);
+    setWatchlist(watchlist.filter(w => w.id !== id));
+  };
+
   const sellEntry = async (id, sale) => {
     const entry = entries.find(e => e.id === id);
     if (!entry) return;
@@ -344,6 +375,16 @@ export default function App() {
             onCardClick={setDetailCard}
           />
         )}
+        {view === 'watch' && (
+          <WatchView
+            watchlist={watchlist}
+            catalogIndex={catalogIndex}
+            variantRev={variantRev}
+            onCardClick={setDetailCard}
+            onRemove={removeFromWatchlist}
+            onUpdate={updateWatchlistItem}
+          />
+        )}
         {view === 'transactions' && (
           <TransactionsView
             transactions={transactions}
@@ -398,9 +439,15 @@ export default function App() {
           card={detailCard}
           entries={entries.filter(e => e.card_id === detailCard.id)}
           collections={collections}
+          watchEntry={watchlist.find(w => w.card_id === detailCard.id) || null}
           onClose={() => setDetailCard(null)}
           onAddToCollection={() => { setAddingCard(detailCard); setDetailCard(null); }}
           onRemoveEntry={removeEntry}
+          onToggleWatch={() => {
+            const existing = watchlist.find(w => w.card_id === detailCard.id);
+            if (existing) removeFromWatchlist(existing.id);
+            else addToWatchlist(detailCard);
+          }}
           onToggleErrata={() => {
             // Pre-errata twins are stored against the BASE card id (not the
             // twin's suffixed id), so strip the suffix if the user opened the
@@ -460,6 +507,9 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         </button>
         <button className={`op-nav-btn ${view === 'search' ? 'is-active' : ''}`} onClick={() => setView('search')}>
           <Search size={15} /> Search
+        </button>
+        <button className={`op-nav-btn ${view === 'watch' ? 'is-active' : ''}`} onClick={() => setView('watch')}>
+          <Eye size={15} /> Watch
         </button>
         <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
           <BarChart3 size={15} /> Transactions
@@ -1516,6 +1566,141 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// WatchView: cards you're tracking for new listings. Scraper integration is
+// stubbed for now — each row exposes target price, notes, and a placeholder
+// for the most recent listing the scraper found (last_seen_*). When a scraper
+// pipeline lands later it just needs to call `updateWatchlistItem(id, {
+// last_checked_at, last_seen_url, last_seen_price, last_seen_source })`.
+function WatchView({ watchlist, catalogIndex, variantRev = 0, onCardClick, onRemove, onUpdate }) {
+  const [q, setQ] = useStoredState('optcg:watch:q', '');
+
+  const enriched = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return watchlist
+      .map(w => ({ w, card: catalogIndex.get(w.card_id) }))
+      .filter(({ w, card }) => {
+        if (!needle) return true;
+        const hay = [w.card_display_name, card?.name, card?.fullName, w.notes, card?.setName].filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(needle);
+      })
+      .sort((a, b) => (b.w.created_at || '').localeCompare(a.w.created_at || ''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchlist, catalogIndex, q, variantRev]);
+
+  return (
+    <div className="op-view">
+      <div className="op-page-head">
+        <div>
+          <div className="op-eyebrow">Watch list</div>
+          <h1 className="op-page-title">Cards on watch</h1>
+          <div className="op-page-sub">
+            {watchlist.length.toLocaleString()} {watchlist.length === 1 ? 'card' : 'cards'} · scraper integration pending — last-seen fields will populate once it's wired up
+          </div>
+        </div>
+      </div>
+
+      <div className="op-search-bar op-search-bar-inline">
+        <Search size={16} className="op-search-icon" />
+        <input
+          className="op-search-input"
+          placeholder="Search your watch list…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        {q && (
+          <button className="op-search-clear" onClick={() => setQ('')}><X size={15} /></button>
+        )}
+      </div>
+
+      {watchlist.length === 0 ? (
+        <div className="op-empty">
+          <Eye size={36} strokeWidth={1.2} />
+          <div className="op-empty-title">Nothing on watch yet</div>
+          <div className="op-empty-sub">Open any card from search and click the Watch button to start tracking listings for it.</div>
+        </div>
+      ) : (
+        <div className="op-watch-list">
+          {enriched.map(({ w, card }) => (
+            <WatchRow
+              key={w.id}
+              w={w}
+              card={card}
+              onCardClick={card ? () => onCardClick(card) : null}
+              onRemove={() => onRemove(w.id)}
+              onUpdate={(patch) => onUpdate(w.id, patch)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WatchRow({ w, card, onCardClick, onRemove, onUpdate }) {
+  const [target, setTarget] = useState(w.target_price != null ? String(w.target_price) : '');
+  const [notes, setNotes] = useState(w.notes || '');
+  const raw = card ? effectiveRawPrice(card) : 0;
+  const targetNum = Number(target) || 0;
+  const lastSeen = Number(w.last_seen_price) || 0;
+  const beatsTarget = targetNum > 0 && lastSeen > 0 && lastSeen <= targetNum;
+
+  const commitTarget = () => {
+    const next = target.trim() === '' ? null : Number(target);
+    if (next !== w.target_price) onUpdate({ target_price: next });
+  };
+  const commitNotes = () => {
+    if (notes !== (w.notes || '')) onUpdate({ notes });
+  };
+
+  return (
+    <div className={`op-watch-row ${beatsTarget ? 'is-hit' : ''}`}>
+      <button className="op-watch-art" onClick={onCardClick} disabled={!onCardClick} title={card ? 'Open card details' : 'Card not found in catalog'}>
+        {card ? <CardThumb card={card} size={48} /> : <div className="op-card-thumb-fallback" style={{ width: 48, height: 67, background: 'var(--paper-warm)' }}><ImageOff size={16} opacity={0.5} /></div>}
+      </button>
+      <div className="op-watch-main">
+        <div className="op-watch-name">{card ? card.name : w.card_display_name || w.card_id}</div>
+        <div className="op-watch-meta">
+          {card ? <>{card.displayId || card.id} · {card.setName}</> : <>{w.card_id} · (not in catalog)</>}
+          {raw > 0 && <> · Raw <strong>${raw.toFixed(2)}</strong></>}
+        </div>
+      </div>
+      <div className="op-watch-field">
+        <label>Target $</label>
+        <input
+          type="number" step="0.01" placeholder="—"
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          onBlur={commitTarget}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+        />
+      </div>
+      <div className="op-watch-field op-watch-last-seen">
+        <label>Last seen</label>
+        {lastSeen > 0 ? (
+          <a href={w.last_seen_url || '#'} target="_blank" rel="noreferrer" className={beatsTarget ? 'is-hit' : ''}>
+            ${lastSeen.toFixed(2)}{w.last_seen_source ? ` · ${w.last_seen_source}` : ''}
+          </a>
+        ) : (
+          <span className="op-watch-empty">—</span>
+        )}
+      </div>
+      <div className="op-watch-notes">
+        <label>Notes</label>
+        <input
+          type="text" placeholder="e.g. only PSA 10, must be English"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          onBlur={commitNotes}
+        />
+      </div>
+      <button className="op-entry-remove" onClick={onRemove} title="Remove from watch list">
+        <X size={15} />
+      </button>
     </div>
   );
 }
@@ -2601,8 +2786,9 @@ function Field({ label, children }) {
 }
 
 // ============================================================================
-function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollection, onRemoveEntry, onToggleErrata }) {
+function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onAddToCollection, onRemoveEntry, onToggleErrata, onToggleWatch }) {
   const erratMarked = hasPreErrata(card.id.replace(/__pre-errata$/, ''));
+  const isWatched = Boolean(watchEntry);
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
 
@@ -2718,6 +2904,13 @@ function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollecti
           )}
 
           <div className="op-drawer-actions">
+            <button
+              className="op-btn-ghost"
+              onClick={onToggleWatch}
+              title={isWatched ? 'Remove from watch list' : 'Add to watch list — scrapers will look for new listings'}
+            >
+              {isWatched ? <><EyeOff size={15} /> Unwatch</> : <><Eye size={15} /> Watch</>}
+            </button>
             <button
               className="op-btn-ghost"
               onClick={onToggleErrata}

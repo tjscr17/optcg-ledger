@@ -704,6 +704,56 @@ body { background: var(--paper); }
 .op-search-bar-inline { margin: 14px 0 6px; }
 .op-search-bar-inline .op-search-input { font-size: 14px; padding: 10px 14px 10px 40px; }
 
+/* WATCH LIST */
+.op-watch-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.op-watch-row {
+  display: grid;
+  grid-template-columns: auto 1.4fr 110px 140px 1fr auto;
+  align-items: center; gap: 14px;
+  padding: 10px 14px;
+  background: var(--paper); border: 1px solid var(--line-strong);
+}
+.op-watch-row.is-hit { border-left: 4px solid var(--jade); }
+.op-watch-art { background: transparent; border: none; cursor: pointer; padding: 0; }
+.op-watch-art:disabled { cursor: default; opacity: 0.6; }
+.op-watch-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.op-watch-name {
+  font-family: var(--display); font-weight: 600; font-size: 15px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.op-watch-meta { font-family: var(--mono); font-size: 10px; color: var(--ink-soft); }
+.op-watch-field, .op-watch-notes { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.op-watch-field label, .op-watch-notes label {
+  font-family: var(--mono); font-size: 8px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft);
+}
+.op-watch-field input, .op-watch-notes input {
+  padding: 5px 8px; font-size: 12px; font-family: var(--body);
+  border: 1px solid var(--line); background: var(--paper-warm); outline: none;
+}
+.op-watch-field input:focus, .op-watch-notes input:focus { border-color: var(--ink); }
+.op-watch-last-seen a {
+  font-family: var(--display); font-weight: 600; font-size: 14px;
+  color: var(--ink); text-decoration: none;
+}
+.op-watch-last-seen a.is-hit { color: var(--jade); }
+.op-watch-last-seen a:hover { text-decoration: underline; }
+.op-watch-empty { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
+
+@media (max-width: 800px) {
+  .op-watch-row {
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: "art main remove" "field1 field2 field2" "notes notes notes";
+    gap: 8px;
+  }
+  .op-watch-art { grid-area: art; }
+  .op-watch-main { grid-area: main; }
+  .op-watch-row > .op-watch-field:nth-of-type(1) { grid-area: field1; }
+  .op-watch-row > .op-watch-field:nth-of-type(2) { grid-area: field2; }
+  .op-watch-notes { grid-area: notes; }
+  .op-watch-row > .op-entry-remove { grid-area: remove; }
+}
+
 /* ENTRY SORT */
 .op-entries-sort {
   display: flex; align-items: center; gap: 10px;

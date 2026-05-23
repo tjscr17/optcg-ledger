@@ -148,6 +148,26 @@ const solo = {
 //   create policy "vault read t"  on transactions for select using (true);
 //   create policy "vault write t" on transactions for all using (true);
 //
+//   -- Cards on watch — scraper integration populates the last_seen_* fields.
+//   create table watchlist (
+//     id uuid primary key default gen_random_uuid(),
+//     vault_key text not null,
+//     card_id text not null,
+//     card_display_name text,
+//     target_price numeric,
+//     notes text,
+//     last_checked_at timestamptz,
+//     last_seen_url text,
+//     last_seen_price numeric default 0,
+//     last_seen_source text,
+//     created_at timestamptz default now()
+//   );
+//   create index on watchlist (vault_key);
+//   alter publication supabase_realtime add table watchlist;
+//   alter table watchlist enable row level security;
+//   create policy "vault read w"  on watchlist for select using (true);
+//   create policy "vault write w" on watchlist for all using (true);
+//
 // (You can tighten policies later if you want.)
 
 const shared = {
