@@ -338,8 +338,19 @@ export default function App() {
     setEntries(entries.filter(e => e.id !== id));
   };
 
-  const activeCollection = collections.find(c => c.id === activeCollectionId);
-  const activeEntries = entries.filter(e => e.collection_id === activeCollectionId);
+  // 'all' is a synthetic collection that aggregates entries/transactions
+  // across every real collection. We materialize it here so the rest of the
+  // app can treat it like any other collection.
+  const isAllMode = activeCollectionId === 'all';
+  const allMembers = useMemo(() => {
+    const set = new Set();
+    for (const c of collections) for (const m of (c.members || [])) set.add(m);
+    return [...set];
+  }, [collections]);
+  const activeCollection = isAllMode
+    ? { id: 'all', name: 'All Collections', members: allMembers, synthetic: true }
+    : collections.find(c => c.id === activeCollectionId);
+  const activeEntries = isAllMode ? entries : entries.filter(e => e.collection_id === activeCollectionId);
 
   if (loading || catalogLoading) {
     return (
@@ -379,7 +390,7 @@ export default function App() {
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
             onSellEntry={(entry) => setSellingEntry(entry)}
-            onUpdateMembers={(members) => updateMembers(activeCollection.id, members)}
+            onUpdateMembers={isAllMode ? null : (members) => updateMembers(activeCollection.id, members)}
             onEditEntry={(entry) => {
               const card = catalogIndex.get(entry.card_id);
               if (!card) return;
@@ -524,7 +535,9 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
     return () => document.removeEventListener('mousedown', onClick);
   }, []);
 
-  const active = collections.find(c => c.id === activeCollectionId);
+  const active = activeCollectionId === 'all'
+    ? { id: 'all', name: 'All Collections' }
+    : collections.find(c => c.id === activeCollectionId);
 
   return (
     <header className="op-header">
@@ -562,6 +575,13 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         </button>
         {menuOpen && (
           <div className="op-collection-menu">
+            {collections.length > 1 && (
+              <div className={`op-collection-item op-collection-item-all ${activeCollectionId === 'all' ? 'is-active' : ''}`}>
+                <button className="op-collection-item-btn" onClick={() => { setActiveCollectionId('all'); setMenuOpen(false); }}>
+                  ★ All Collections <span className="op-collection-item-sub">aggregate across {collections.length}</span>
+                </button>
+              </div>
+            )}
             {collections.map(c => (
               <div key={c.id} className={`op-collection-item ${c.id === activeCollectionId ? 'is-active' : ''}`}>
                 {editingId === c.id ? (
@@ -624,8 +644,9 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers = () => {} }) {
+function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers }) {
   const members = Array.isArray(collection?.members) ? collection.members : [];
+  const isSynthetic = Boolean(collection?.synthetic);
   const [entrySort, setEntrySort] = useStoredState('optcg:collection:entrySort', 'recent');
   const [colQ, setColQ] = useStoredState('optcg:collection:q', '');
 
@@ -713,7 +734,9 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
         </button>
       </div>
 
-      <MembersPanel members={members} onUpdate={onUpdateMembers} />
+      {!isSynthetic && onUpdateMembers && (
+        <MembersPanel members={members} onUpdate={onUpdateMembers} />
+      )}
 
       <div className="op-stats">
         <Stat label="Paid In" value={`$${stats.totalPaid.toFixed(2)}`} />
@@ -846,15 +869,14 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
     // Legacy entries that pre-date the transaction log have contributions on
     // the entry itself but no matching buy tx. Detect & include them so old
     // data doesn't vanish from the equity panel.
-    const scopedTxs = collectionId
-      ? transactions.filter(t => t.collection_id === collectionId)
-      : transactions;
+    const allMode = !collectionId || collectionId === 'all';
+    const scopedTxs = allMode ? transactions : transactions.filter(t => t.collection_id === collectionId);
     const buyTxKeys = new Set(
       scopedTxs.filter(t => t.type === 'buy').map(t => `${t.card_id}|${(t.occurred_at || t.created_at || '').slice(0, 10)}`)
     );
     const legacyBuyContribs = entries
       .filter(e => {
-        if (collectionId && e.collection_id !== collectionId) return false;
+        if (!allMode && e.collection_id !== collectionId) return false;
         if (!Array.isArray(e.contributions) || e.contributions.length === 0) return false;
         const key = `${e.card_id}|${(e.acquired_at || e.added_at || '').slice(0, 10)}`;
         return !buyTxKeys.has(key);
@@ -914,7 +936,7 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
       ...legacyBuyContribs.length > 0
         ? entries
             .filter(e => {
-              if (collectionId && e.collection_id !== collectionId) return false;
+              if (!allMode && e.collection_id !== collectionId) return false;
               if (!Array.isArray(e.contributions) || e.contributions.length === 0) return false;
               const key = `${e.card_id}|${(e.acquired_at || e.added_at || '').slice(0, 10)}`;
               return !buyTxKeys.has(key);
@@ -1964,8 +1986,10 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
 
   const activeCollection = collectionsById.get(activeCollectionId) || collections[0];
   const equityEntries = useMemo(
-    () => entries.filter(e => !collectionFilter || collectionFilter === 'all' ? e.collection_id === (activeCollection?.id) : e.collection_id === collectionFilter),
-    [entries, collectionFilter, activeCollection]
+    () => (!collectionFilter || collectionFilter === 'all')
+      ? entries
+      : entries.filter(e => e.collection_id === collectionFilter),
+    [entries, collectionFilter]
   );
 
   // Effective NAV across the entries the equity panel uses.
@@ -2003,7 +2027,17 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
     return { bought, sold, expenses, net: sold - bought - expenses };
   }, [filtered]);
 
-  const equityCollection = collectionFilter !== 'all' ? collectionsById.get(collectionFilter) : activeCollection;
+  // For 'All collections' filter we synthesize a collection so the equity
+  // panel still has somewhere to live; it gets a special id ('all') that the
+  // EquityPanel reads as "don't filter transactions".
+  const aggregateMembers = useMemo(() => {
+    const s = new Set();
+    for (const c of collections) for (const m of (c.members || [])) s.add(m);
+    return [...s];
+  }, [collections]);
+  const equityCollection = collectionFilter === 'all'
+    ? { id: 'all', name: 'All Collections', members: aggregateMembers, synthetic: true }
+    : (collectionsById.get(collectionFilter) || activeCollection);
   const equityMembers = Array.isArray(equityCollection?.members) ? equityCollection.members : [];
 
   return (
@@ -2502,7 +2536,11 @@ function FilterGroup({ label, value, onChange, options, mode, compact }) {
 // ============================================================================
 function AddCardModal({ card, entry, collections, activeCollectionId, onClose, onSave }) {
   const editing = Boolean(entry);
-  const [collectionId, setCollectionId] = useState(entry?.collection_id || activeCollectionId);
+  // Synthetic 'all' isn't a real collection — fall back to the first real one
+  // when the user adds a card while viewing All Collections.
+  const defaultCollectionId = entry?.collection_id
+    || (activeCollectionId && activeCollectionId !== 'all' ? activeCollectionId : (collections[0]?.id || null));
+  const [collectionId, setCollectionId] = useState(defaultCollectionId);
   const members = useMemo(() => {
     const col = collections.find(c => c.id === collectionId);
     return Array.isArray(col?.members) ? col.members : [];
