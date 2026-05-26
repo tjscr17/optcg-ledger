@@ -117,7 +117,41 @@ export const matchCatalogCard = (cert, catalog) => {
     if (match) break;
   }
 
-  // 4. Last resort: fuzzy-match PSA subject against catalog card names.
+  // 4. PSA often returns just the trailing card number (e.g. "118") with the
+  // set encoded only in Brand/Category text we can't reliably parse. So if
+  // we have a numeric card_number AND a subject, intersect (subject ≈ card
+  // name) ∩ (displayId ends in -{num}).
+  if (!match && cert.subject && cert.card_number) {
+    const subj = cert.subject.toLowerCase().trim();
+    const numMatch = String(cert.card_number).match(/(\d+)/);
+    if (numMatch) {
+      const num = numMatch[1].padStart(3, '0');
+      const subjectFirstWord = subj.split(/[\s,]/)[0];
+      const candidates = catalog.filter(c => {
+        const display = (c.displayId || c.id || '').toUpperCase();
+        if (!display.endsWith(`-${num}`)) return false;
+        const name = (c.name || '').toLowerCase().trim();
+        // Either full-name match or any token overlap with subject's first word.
+        return name === subj
+          || name.includes(subj)
+          || subj.includes(name)
+          || (subjectFirstWord && name.includes(subjectFirstWord));
+      });
+      if (candidates.length === 1) {
+        match = candidates[0];
+      } else if (candidates.length > 1) {
+        // Prefer non-parallel/non-alt-art base prints by default; fall back to
+        // the most recent set if everything ties. The user can still override
+        // via the manual picker if we pick the wrong twin.
+        const nonParallel = candidates.filter(c => !c.isParallel);
+        const pool = nonParallel.length > 0 ? nonParallel : candidates;
+        pool.sort((a, b) => (b.setId || '').localeCompare(a.setId || ''));
+        match = pool[0];
+      }
+    }
+  }
+
+  // 5. Last resort: fuzzy-match PSA subject against catalog card names.
   if (!match && cert.subject) {
     const subj = cert.subject.toLowerCase();
     const namedHits = catalog.filter(c => (c.name || '').toLowerCase().includes(subj.split(/[\s,]/)[0]));
@@ -126,7 +160,7 @@ export const matchCatalogCard = (cert, catalog) => {
 
   if (!match) return null;
 
-  // 5. If multiple printings share that display id (base + parallel/alt-art),
+  // 6. If multiple printings share that display id (base + parallel/alt-art),
   // refine by checking PSA's pedigree / subject for "ALTERNATE", "PARALLEL", etc.
   const targetDisplay = (match.displayId || match.id || '').toUpperCase();
   const same = catalog.filter(c => (c.displayId || c.id || '').toUpperCase() === targetDisplay);
