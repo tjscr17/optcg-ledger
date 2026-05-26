@@ -1073,13 +1073,26 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
         if (c.amount > 0) grossIn.set(c.name, (grossIn.get(c.name) || 0) + c.amount);
         nav += c.amount; // signed cash flow into the pool
       }
-      // For buys, give existing unitholders any instant gain from acquiring a
-      // card whose market exceeds what we paid.
+      // For buys, bump NAV to reflect today's market value of the acquired
+      // card — positive when the card's up vs. cost, negative when it's down.
+      // Net effect: NAV change on a buy = card's current market (cash + delta).
+      // This is what lets new contributions buy in at a depressed unit price
+      // when the pool is underwater, and a premium when the pool is up.
       if (ev.kind === 'buy') {
         const market = currentNavOfCard(t.card_id);
         const paid = Number(t.amount) || 0;
-        const bonus = Math.max(0, market - paid);
-        if (bonus > 0) nav += bonus;
+        const bonus = market - paid;
+        if (bonus !== 0) nav += bonus;
+      }
+      // For sells, the cash-out leg only reduced NAV by proceeds. The card
+      // itself is also leaving the pool, so subtract its current market on
+      // top — total NAV change ends up at -market, matching reality even if
+      // proceeds came in below (or above) today's market.
+      if (ev.kind === 'sell') {
+        const market = currentNavOfCard(t.card_id);
+        const proceeds = Number(t.amount) || 0;
+        const adjustment = -(market - proceeds);
+        if (adjustment !== 0) nav += adjustment;
       }
     }
 
