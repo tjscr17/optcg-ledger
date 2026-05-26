@@ -3094,10 +3094,18 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
               </select>
             </Field>
             <Field label="Condition">
-              <select value={condition} onChange={(e) => setCondition(e.target.value)}>
-                {CONDITIONS.map(c => <option key={c} value={c}>{c}</option>)}
+              <select value={isGraded ? 'graded' : 'raw'} onChange={(e) => setIsGraded(e.target.value === 'graded')}>
+                <option value="raw">Raw</option>
+                <option value="graded">Graded</option>
               </select>
             </Field>
+            {!isGraded && (
+              <Field label="Raw grade">
+                <select value={condition} onChange={(e) => setCondition(e.target.value)}>
+                  {CONDITIONS.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </Field>
+            )}
           </div>
 
           <div className="op-form-row">
@@ -3145,6 +3153,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
             )}
           </div>
 
+          {isGraded && (
           <div className="op-form-section">
             <div className="op-form-section-head">
               <div>
@@ -3154,14 +3163,8 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                 </div>
                 <div className="op-form-section-sub">Track PSA, BGS, CGC, or SGC grade and pull live graded market price.</div>
               </div>
-              <label className="op-graded-toggle">
-                <input type="checkbox" checked={isGraded} onChange={(e) => setIsGraded(e.target.checked)} />
-                <span>This copy is graded</span>
-              </label>
             </div>
 
-            {isGraded && (
-              <>
                 <div className="op-form-row">
                   <Field label="Grading company">
                     <select value={gradingCompany} onChange={(e) => setGradingCompany(e.target.value)}>
@@ -3255,9 +3258,8 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                 )}
                 {variantsError && <div className="op-graded-error">{variantsError}</div>}
                 {priceFetchError && <div className="op-graded-error">{priceFetchError}</div>}
-              </>
-            )}
           </div>
+          )}
 
           <Field label="Notes (optional)">
             <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Where bought, condition notes, etc." />
