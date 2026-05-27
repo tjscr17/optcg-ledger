@@ -102,123 +102,10 @@ const extractSetIds = (s) => {
   return sets;
 };
 
-const norm = (s) => (s || '').toString().toUpperCase().replace(/[\s_]/g, '');
-
-// Heuristic match: find the OPTCG catalog card that corresponds to the PSA
-// cert. PSA's CardNumber format varies — it can be the bare card_set_id, a
-// stripped variant, the running number only, or buried in VarietyPedigree
-// / Subject. We try several strategies and prefer the most specific match.
-export const matchCatalogCard = (cert, catalog) => {
-  if (!cert || !Array.isArray(catalog)) return null;
-
-  // 1. Collect every candidate OPTCG id we can extract from the PSA payload.
-  const candidates = new Set();
-  const textFields = [cert.card_number, cert.subject, cert.brand, cert.category, cert.raw?.VarietyPedigree, cert.raw?.Subject, cert.raw?.Brand, cert.raw?.Category, cert.raw?.CardNumber];
-  for (const field of textFields) {
-    for (const id of extractOptcgIds(field)) candidates.add(id);
-  }
-  // Also try the raw card_number as a normalized direct match.
-  if (cert.card_number) candidates.add(norm(cert.card_number).replace(/-/g, '').replace(/^(OP|ST|EB|PRB)(\d+)(\d{3})$/i, '$1$2-$3'));
-
-  // Reconstruct full ids by pairing any standalone set prefixes (e.g. "OP11"
-  // from Brand="ONE PIECE OP11-A FIST OF DIVINE SPEED") with the trailing
-  // CardNumber digits. This is the common PSA format for One Piece certs.
-  const numDigits = cert.card_number ? String(cert.card_number).match(/(\d+)/)?.[1] : null;
-  if (numDigits) {
-    const paddedNum = numDigits.padStart(3, '0');
-    const setIds = new Set();
-    for (const field of textFields) {
-      for (const s of extractSetIds(field)) setIds.add(s);
-    }
-    for (const s of setIds) candidates.add(`${s}-${paddedNum}`);
-  }
-
-  // 2. Build a quick lookup table over the catalog using multiple key forms.
-  const byKey = new Map();
-  for (const c of catalog) {
-    const display = (c.displayId || c.id || '').toUpperCase();
-    const variants = [display, norm(display), display.replace(/-/g, '')];
-    for (const k of variants) if (k && !byKey.has(k)) byKey.set(k, c);
-  }
-
-  // 3. Try each candidate id against the lookup.
-  let match = null;
-  for (const cand of candidates) {
-    const u = cand.toUpperCase();
-    match = byKey.get(u) || byKey.get(norm(u)) || byKey.get(u.replace(/-/g, ''));
-    if (match) break;
-  }
-
-  // 4. PSA often returns just the trailing card number (e.g. "118") with the
-  // set encoded only in Brand/Category text we can't reliably parse. So if
-  // we have a numeric card_number AND a subject, intersect (subject ≈ card
-  // name) ∩ (displayId ends in -{num}).
-  if (!match && cert.subject && cert.card_number) {
-    const subj = cert.subject.toLowerCase().trim();
-    const numMatch = String(cert.card_number).match(/(\d+)/);
-    if (numMatch) {
-      const num = numMatch[1].padStart(3, '0');
-      const subjectFirstWord = subj.split(/[\s,]/)[0];
-      const candidates = catalog.filter(c => {
-        const display = (c.displayId || c.id || '').toUpperCase();
-        if (!display.endsWith(`-${num}`)) return false;
-        const name = (c.name || '').toLowerCase().trim();
-        // Either full-name match or any token overlap with subject's first word.
-        return name === subj
-          || name.includes(subj)
-          || subj.includes(name)
-          || (subjectFirstWord && name.includes(subjectFirstWord));
-      });
-      if (candidates.length === 1) {
-        match = candidates[0];
-      } else if (candidates.length > 1) {
-        // Prefer non-parallel/non-alt-art base prints by default; fall back to
-        // the most recent set if everything ties. The user can still override
-        // via the manual picker if we pick the wrong twin.
-        const nonParallel = candidates.filter(c => !c.isParallel);
-        const pool = nonParallel.length > 0 ? nonParallel : candidates;
-        pool.sort((a, b) => (b.setId || '').localeCompare(a.setId || ''));
-        match = pool[0];
-      }
-    }
-  }
-
-  // 5. Last resort: fuzzy-match PSA subject against catalog card names.
-  if (!match && cert.subject) {
-    const subj = cert.subject.toLowerCase();
-    const namedHits = catalog.filter(c => (c.name || '').toLowerCase().includes(subj.split(/[\s,]/)[0]));
-    if (namedHits.length === 1) match = namedHits[0];
-  }
-
-  if (!match) return null;
-
-  // 6. If multiple printings share that display id (base + parallel/alt-art),
-  // refine by checking PSA's pedigree / subject for "ALTERNATE", "PARALLEL", etc.
-  const targetDisplay = (match.displayId || match.id || '').toUpperCase();
-  const same = catalog.filter(c => (c.displayId || c.id || '').toUpperCase() === targetDisplay);
-  if (same.length > 1) {
-    const blob = `${cert.raw?.VarietyPedigree || ''} ${cert.subject || ''}`.toLowerCase();
-    const wantsParallel = /alternate|parallel|alt[- ]art|sp\b|spr\b/.test(blob);
-    const preferred = same.find(c => Boolean(c.isParallel) === wantsParallel);
-    if (preferred) return preferred;
-  }
-  return match;
-};
-
-// Wide candidate net for the picker. Accumulates from every match strategy
-// (sibling-by-displayId, name + number intersection, set-prefix × number,
-// cross-set reprints, plus name-only matching) and dedupes.
-// matchCatalogCard's best guess is pinned at index 0; the rest are sorted
-// non-parallel first, then by setId desc so the more recent printings rise.
-//
-// Cap is 25 entries to keep the picker scannable.
-const CANDIDATE_CAP = 25;
-
 // Tokenize a name/subject for comparison. Lowercases, strips punctuation,
 // drops single-character noise and the few stopwords that show up in card
 // names. PSA's "MONKEY D. LUFFY" and our "Monkey D. Luffy" both reduce to
-// the same `["monkey", "d", "luffy"]` — well, `["monkey", "luffy"]` after
-// the single-char filter, which is fine for matching.
+// `["monkey", "luffy"]` after the single-char filter, which is fine.
 const STOPWORDS = new Set(['the', 'a', 'an', 'and', 'of', 'in']);
 const tokenize = (s) => (s || '')
   .toString().toLowerCase()
@@ -228,7 +115,7 @@ const tokenize = (s) => (s || '')
 
 // True if every significant subject token appears in the card name's tokens.
 // Catches "Monkey D. Luffy" matching "Monkey D. Luffy (Manga Art)" and
-// "Roronoa Zoro" matching "Roronoa Zoro" but not random partial overlaps.
+// "ZORO" matching "Roronoa Zoro" but not random partial overlaps.
 const nameMatchesSubject = (cardName, subject) => {
   const subjTokens = tokenize(subject);
   if (subjTokens.length === 0) return false;
@@ -236,111 +123,136 @@ const nameMatchesSubject = (cardName, subject) => {
   return subjTokens.every(t => nameTokens.has(t));
 };
 
+const CANDIDATE_CAP = 25;
+
+// Returns true if a catalog card belongs to one of the PSA-derived setIds.
+// Checks card.setId (normalized: "OP-12" → "OP12") AND card.originalSetId
+// (for promos that we bucket under setId="PROMO" but originally came from
+// e.g. OP-09). Promos in setId="PROMO" match against the special PROMO key.
+const cardInAnySet = (card, setIds) => {
+  if (setIds.size === 0) return false;
+  const setNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
+  if (setNorm && setIds.has(setNorm)) return true;
+  const origNorm = (card.originalSetId || '').replace(/-/g, '').toUpperCase();
+  if (origNorm && setIds.has(origNorm)) return true;
+  return false;
+};
+
+// Pull every recognizable set prefix from the PSA cert. Brand is the primary
+// signal ("ONE PIECE OP11-A FIST OF DIVINE SPEED" → OP11); Category is a
+// backup; Subject and CardNumber sometimes carry it too.
+const extractCertSetIds = (cert) => {
+  const setIds = new Set();
+  const fields = [cert.brand, cert.raw?.Brand, cert.category, cert.raw?.Category, cert.subject, cert.raw?.Subject, cert.card_number, cert.raw?.CardNumber, cert.raw?.VarietyPedigree];
+  for (const f of fields) for (const s of extractSetIds(f)) setIds.add(s.toUpperCase());
+  // PSA brands often spell "PROMO" — also match cards in the PROMO bucket.
+  const brandText = `${cert.brand || ''} ${cert.raw?.Brand || ''}`.toUpperCase();
+  if (/\bPROMO\b/.test(brandText)) setIds.add('PROMO');
+  return setIds;
+};
+
+// The PSA → OPTCG matcher.
+//
+// Algorithm (simple, in order):
+//   1. Brand → set    (extract OP11 / ST21 / EB02 / PROMO from the Brand text)
+//   2. CardNumber → trailing card number (last digits, zero-padded to 3)
+//   3. Look up cards in the catalog where (set, trailing-number) match.
+//   4. If Subject is present and multiple cards remain, filter to those
+//      whose name matches the Subject (token-set match: PSA's "MONKEY D.
+//      LUFFY" ↔ catalog "Monkey D. Luffy").
+//   5. Sort: non-parallel base first, then by setId desc.
+//
+// Cards in a different printing set (cross-set reprints) are also matched —
+// `card.setId` and `card.originalSetId` are both checked against the
+// PSA-derived set, so an OP12 parallel printing of ST01-004 (with
+// displayId "ST01-004" but setId "OP-12") shows up under PSA's "OP12 / 004".
+//
+// Fallbacks (only when steps 1–4 yield nothing): subject-only across all
+// sets, then OPTCG-id extraction from any field, then any catalog card
+// whose displayId trails the CardNumber.
 export const findCandidateCards = (cert, catalog) => {
   if (!cert || !Array.isArray(catalog)) return [];
-  const seen = new Map(); // id -> card
-  const add = (c) => { if (c && !seen.has(c.id) && seen.size < CANDIDATE_CAP) seen.set(c.id, c); };
-
-  const primary = matchCatalogCard(cert, catalog);
-  if (primary) add(primary);
-
-  // A) siblings of the primary's displayId
-  if (primary) {
-    const targetDisplay = (primary.displayId || primary.id || '').toUpperCase();
-    for (const c of catalog) {
-      if ((c.displayId || c.id || '').toUpperCase() === targetDisplay) add(c);
-    }
-  }
-
   const subj = (cert.subject || '').trim();
-  const subjTokens = tokenize(subj);
   const numMatch = (cert.card_number || '').toString().match(/(\d+)/);
-  const numDigits = numMatch?.[1] || null;
-  const numPadded = numDigits ? numDigits.padStart(3, '0') : null;
+  const numPadded = numMatch ? numMatch[1].padStart(3, '0') : null;
+  const setIds = extractCertSetIds(cert);
 
-  // B) cards whose displayId ends in `-{num}` AND name matches subject.
-  //    Catches alt-arts / cross-set parallels sharing the trailing card
-  //    number but living under a different setId in the catalog.
-  if (subj && numPadded) {
-    for (const c of catalog) {
-      const display = (c.displayId || c.id || '').toUpperCase();
-      if (!display.endsWith(`-${numPadded}`)) continue;
-      if (nameMatchesSubject(c.name, subj)) add(c);
+  const trailingMatchesNum = (c) =>
+    numPadded ? (c.displayId || c.id || '').toUpperCase().endsWith(`-${numPadded}`) : false;
+
+  // Step 1+2+3: cards in the PSA-derived set(s) whose displayId ends in
+  // the PSA-derived card number. This is the primary path.
+  let matches = [];
+  if (setIds.size > 0 && numPadded) {
+    matches = catalog.filter(c => cardInAnySet(c, setIds) && trailingMatchesNum(c));
+  }
+
+  // Step 4: subject-narrow when present and we got multiple hits. A single
+  // hit doesn't need narrowing; zero hits drops to fallbacks below.
+  if (matches.length > 1 && subj) {
+    const named = matches.filter(c => nameMatchesSubject(c.name, subj));
+    if (named.length > 0) matches = named;
+  }
+
+  // Fallback A: set + subject (without number). Brand identified the set
+  // but PSA's CardNumber didn't pin a printing (e.g. promos with
+  // alphanumeric card numbers PSA records oddly).
+  if (matches.length === 0 && setIds.size > 0 && subj) {
+    matches = catalog.filter(c => cardInAnySet(c, setIds) && nameMatchesSubject(c.name, subj));
+  }
+
+  // Fallback B: subject-only across the whole catalog. Brand didn't yield
+  // a recognizable set, but the subject is clean enough to hit cards by name.
+  if (matches.length === 0 && subj) {
+    matches = catalog.filter(c => nameMatchesSubject(c.name, subj));
+  }
+
+  // Fallback C: extract any OPTCG-format id from PSA fields and look it up.
+  if (matches.length === 0) {
+    const ids = new Set();
+    for (const f of [cert.card_number, cert.brand, cert.subject, cert.category,
+                     cert.raw?.CardNumber, cert.raw?.VarietyPedigree,
+                     cert.raw?.Brand, cert.raw?.Category, cert.raw?.Subject]) {
+      for (const id of extractOptcgIds(f)) ids.add(id.toUpperCase());
+    }
+    if (ids.size > 0) {
+      matches = catalog.filter(c => ids.has((c.displayId || c.id || '').toUpperCase()));
     }
   }
 
-  // C) reconstruct full ids by pairing every set prefix we can find in the
-  //    PSA payload with the card-number digits, then sweep the catalog for
-  //    matches under two interpretations:
-  //      C.1) displayId === `${setId}-${num}` — normal case
-  //      C.2) card.setId === `${setId}` (normalized) AND displayId ends in
-  //           `-${num}` — cross-set reprints/parallels, where the printing
-  //           comes from setId but keeps its original identity. e.g. PSA
-  //           says "OP12 / 004" for a card whose canonical id is
-  //           `OP12:ST01-004-p1` — its catalog displayId is "ST01-004",
-  //           but card.setId is "OP-12".
-  if (numPadded) {
-    const textFields = [
-      cert.card_number, cert.subject, cert.brand, cert.category,
-      cert.raw?.VarietyPedigree, cert.raw?.Subject, cert.raw?.Brand,
-      cert.raw?.Category, cert.raw?.CardNumber,
-    ];
-    const setIds = new Set();
-    for (const f of textFields) for (const s of extractSetIds(f)) setIds.add(s);
-    for (const setId of setIds) {
-      const target = `${setId}-${numPadded}`;
-      const setIdNorm = setId.toUpperCase();
-      for (const c of catalog) {
-        const display = (c.displayId || c.id || '').toUpperCase();
-        if (display === target) { add(c); continue; }
-        // Cross-set match: physical printing comes from this setId but the
-        // card identity (displayId) belongs to a different set.
-        const cSetNorm = (c.setId || '').replace(/-/g, '').toUpperCase();
-        if (cSetNorm === setIdNorm && display.endsWith(`-${numPadded}`)) add(c);
-      }
-    }
+  // Fallback D: any card whose displayId trails the PSA card number,
+  // regardless of set or subject. Last-resort net.
+  if (matches.length === 0 && numPadded) {
+    matches = catalog.filter(c => trailingMatchesNum(c));
   }
 
-  // D) name-driven match: every card whose name contains all significant
-  //    subject tokens, with no number requirement at all. This is the peer
-  //    strategy that catches cross-set printings PSA labels by a set the
-  //    matcher couldn't infer, and any case where the CardNumber is
-  //    ambiguous but the Subject is clean.
-  if (subjTokens.length > 0) {
-    for (const c of catalog) {
-      if (nameMatchesSubject(c.name, subj)) add(c);
-      if (seen.size >= CANDIDATE_CAP) break;
-    }
-  }
+  if (matches.length === 0) return [];
 
-  // E) name + matching trailing card-number, ignoring set entirely. Useful
-  //    when PSA gives a clear Subject + CardNumber but a Brand we can't
-  //    extract a set prefix from. Adds nothing new if B already ran but
-  //    fires when subject tokens overlap loosely (Subject == card name's
-  //    first half).
-  if (subj && numPadded && seen.size < CANDIDATE_CAP) {
-    const subjLower = subj.toLowerCase();
-    for (const c of catalog) {
-      const display = (c.displayId || c.id || '').toUpperCase();
-      if (!display.endsWith(`-${numPadded}`)) continue;
-      const name = (c.name || '').toLowerCase();
-      if (name && (name.includes(subjLower) || subjLower.includes(name))) add(c);
-      if (seen.size >= CANDIDATE_CAP) break;
-    }
-  }
-
-  // Sort: primary first (already at insertion-order index 0), then
-  // non-parallel before parallel, then by setId descending (most-recent
-  // printings rise).
-  const list = [...seen.values()];
-  if (list.length <= 1) return list;
-  const head = list[0];
-  const rest = list.slice(1);
-  rest.sort((a, b) => {
+  // Rank: cards whose trailing number matches PSA's CardNumber come first,
+  // then non-parallel base before parallel/alt-art, then by setId desc so
+  // more recent printings rise.
+  matches.sort((a, b) => {
+    const aNum = trailingMatchesNum(a) ? 0 : 1;
+    const bNum = trailingMatchesNum(b) ? 0 : 1;
+    if (aNum !== bNum) return aNum - bNum;
     const ap = a.isParallel ? 1 : 0;
     const bp = b.isParallel ? 1 : 0;
     if (ap !== bp) return ap - bp;
     return (b.setId || '').localeCompare(a.setId || '');
   });
-  return [head, ...rest];
+
+  // Dedup and cap.
+  const seen = new Set();
+  const out = [];
+  for (const c of matches) {
+    if (seen.has(c.id)) continue;
+    seen.add(c.id);
+    out.push(c);
+    if (out.length >= CANDIDATE_CAP) break;
+  }
+  return out;
 };
+
+// Best single guess for the cert. Returns the top candidate or null.
+export const matchCatalogCard = (cert, catalog) =>
+  findCandidateCards(cert, catalog)[0] || null;

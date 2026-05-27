@@ -748,10 +748,14 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
     return m;
   }, [transactions]);
 
-  // Effective market value for an entry — uses the entry's stored graded
-  // price when present, otherwise falls back to the cached PriceCharting raw.
+  // Effective market value for an entry. Graded entries use their stored
+  // graded_price — and ONLY that, no raw fallback, because the raw market
+  // doesn't represent a slabbed card's value. Graded entries the user
+  // hasn't entered a price for yet contribute 0 (and the UI shows "—" so
+  // it's obviously pending). Raw entries fall through to the TCGCSV raw
+  // market price.
   const marketValueOf = useCallback((e) => {
-    if (e.grading_company && Number(e.graded_price) > 0) return Number(e.graded_price);
+    if (e.grading_company) return Number(e.graded_price) || 0;
     const card = catalogIndex.get(e.card_id);
     return card ? effectiveRawPrice(card) : 0;
   }, [catalogIndex]);
@@ -805,8 +809,11 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
     for (const e of entries) {
       totalPaid += Number(e.purchase_price) || 0;
       totalExpenses += expensesByEntry.get(e.id) || 0;
-      if (e.grading_company && Number(e.graded_price) > 0) {
-        totalMarket += Number(e.graded_price);
+      if (e.grading_company) {
+        // Graded: only the manual graded_price counts; missing → 0 (don't
+        // fall back to raw, since slabbed value isn't raw value).
+        const gp = Number(e.graded_price) || 0;
+        totalMarket += gp;
         gradedCount += 1;
       } else {
         const card = catalogIndex.get(e.card_id);
@@ -911,18 +918,23 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
                   </div>
                 );
               }
-              const marketValue = entry.grading_company && Number(entry.graded_price) > 0
-                ? Number(entry.graded_price)
-                : effectiveRawPrice(card);
+              // Graded entries use only their stored graded_price; no raw
+              // fallback. A graded entry without a price is "pending" — UI
+              // renders the market column as "—" so the user knows to fill it in.
+              const isGradedEntry = Boolean(entry.grading_company);
+              const gradedPrice = Number(entry.graded_price) || 0;
+              const marketKnown = isGradedEntry ? gradedPrice > 0 : true;
+              const marketValue = isGradedEntry ? gradedPrice : effectiveRawPrice(card);
               const expenses = expensesByEntry.get(entry.id) || 0;
               const costBasis = (Number(entry.purchase_price) || 0) + expenses;
-              const delta = marketValue - costBasis;
+              const delta = marketKnown ? marketValue - costBasis : 0;
               return (
                 <EntryRow
                   key={entry.id}
                   entry={entry}
                   card={card}
                   marketValue={marketValue}
+                  marketKnown={marketKnown}
                   expenses={expenses}
                   costBasis={costBasis}
                   delta={delta}
@@ -1284,7 +1296,7 @@ function Stat({ label, value, sub, tone, accent }) {
   );
 }
 
-function EntryRow({ entry, card, marketValue, expenses = 0, costBasis, delta, onClick, onSell, onExpense, onEdit, onDelete }) {
+function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, costBasis, delta, onClick, onSell, onExpense, onEdit, onDelete }) {
   const isGraded = Boolean(entry.grading_company);
   const paid = Number(entry.purchase_price || 0);
   const hasExpenses = expenses > 0;
@@ -1313,12 +1325,21 @@ function EntryRow({ entry, card, marketValue, expenses = 0, costBasis, delta, on
         </div>
         <div className="op-entry-cell">
           <div className="op-entry-cell-label">Market</div>
-          <div className="op-entry-cell-val">${(marketValue || 0).toFixed(2)}</div>
+          <div className="op-entry-cell-val" title={!marketKnown ? 'No graded price entered yet — edit the entry to add one' : undefined}>
+            {marketKnown ? `$${(marketValue || 0).toFixed(2)}` : '—'}
+          </div>
+          {!marketKnown && (
+            <div className="op-entry-cell-sub">graded price pending</div>
+          )}
         </div>
-        <div className={`op-entry-delta ${delta >= 0 ? 'is-pos' : 'is-neg'}`}>
-          {delta >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-          {delta >= 0 ? '+' : ''}${delta.toFixed(2)}
-        </div>
+        {marketKnown ? (
+          <div className={`op-entry-delta ${delta >= 0 ? 'is-pos' : 'is-neg'}`}>
+            {delta >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+            {delta >= 0 ? '+' : ''}${delta.toFixed(2)}
+          </div>
+        ) : (
+          <div className="op-entry-delta">—</div>
+        )}
       </button>
       <button className="op-entry-remove" onClick={onEdit} title="Edit entry">
         <Pencil size={14} />
@@ -2633,8 +2654,11 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
   const equityNav = useMemo(() => {
     let nav = 0;
     for (const e of equityEntries) {
-      if (e.grading_company && Number(e.graded_price) > 0) nav += Number(e.graded_price);
-      else {
+      if (e.grading_company) {
+        // Graded entry: only count if the user has entered a graded_price.
+        // Raw fallback would distort NAV (a PSA 10 isn't worth raw price).
+        nav += Number(e.graded_price) || 0;
+      } else {
         const c = catalogIndex.get(e.card_id);
         if (c) nav += effectiveRawPrice(c);
       }
