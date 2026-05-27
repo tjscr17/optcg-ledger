@@ -228,24 +228,22 @@ const revalidateCatalog = async () => {
   return catalogPromise;
 };
 
-// OPTCGAPI's twoweeks endpoints only recognize the bare card_set_id (e.g.
-// "EB02-061") — passing a parallel/variant suffix ("EB02-061_p2",
-// "OP01-016__pre-errata", or any canonical "-pN" / "-pre-errata" form) gets
-// a 500 with no CORS headers, which surfaces in the browser as a scary CORS
-// error even though we catch the network failure. Normalize before the
-// request to dodge the noise entirely.
+// Strip the parallel/variant suffix off a card id so we cache history under
+// the base printing's key (parallels share history with the base anyway,
+// since OPTCGAPI only tracks history at the base level).
 const stripVariantForApi = (cardId) => {
   if (!cardId) return cardId;
-  // 1) Drop everything from a "__" promo/errata tag onward (OPTCG style).
   let id = String(cardId).split('__')[0];
-  // 2) Drop the "_p\d+" parallel suffix (OPTCG style).
   id = id.replace(/_p\d+$/i, '');
-  // 3) Drop canonical-form variant tag ("-p1", "-pre-errata", "-tournament-winner")
-  //    by keeping only the leading `<setCode>-<cardNumber>`.
   const canonical = id.match(/^[A-Z]+\d+-\d+/i);
   return canonical ? canonical[0] : id;
 };
 
+// Pull 14-day price history through our /api/optcg-history proxy. The
+// proxy handles OPTCGAPI's "500 + no CORS headers" responses server-side
+// and always returns 200 + a (possibly empty) points array, so the browser
+// console stays quiet on cards with no history. Cache the result (including
+// empty) for HISTORY_TTL_MS.
 export const loadPriceHistory = async (cardId) => {
   const queryId = stripVariantForApi(cardId);
   const cacheKey = HISTORY_PREFIX + queryId;
@@ -257,43 +255,22 @@ export const loadPriceHistory = async (cardId) => {
     }
   } catch {}
 
+  let points = [];
   try {
-    // Try set, then starter, then promo endpoints
-    let data = null;
-    for (const path of [
-      `${API}/sets/card/twoweeks/${queryId}/`,
-      `${API}/decks/card/twoweeks/${queryId}/`,
-      `${API}/promos/card/twoweeks/${queryId}/`,
-    ]) {
-      try {
-        const res = await fetchJSON(path);
-        if (Array.isArray(res) && res.length > 0) { data = res; break; }
-      } catch {}
+    const res = await fetch(`/api/optcg-history?id=${encodeURIComponent(queryId)}`);
+    if (res.ok) {
+      const body = await res.json();
+      if (Array.isArray(body?.points)) points = body.points;
     }
-
-    const points = data
-      ? data
-          .map(d => ({
-            date: d.date_scraped || d.date || d.scrape_date,
-            price: Number(d.market_price ?? d.inventory_price) || 0,
-          }))
-          .filter(p => p.date && p.price > 0)
-          .sort((a, b) => a.date.localeCompare(b.date))
-      : [];
-
-    // Cache even the empty result. OPTCGAPI returns 500 (no CORS headers, so
-    // the browser logs it as a CORS error) for cards it has no history for —
-    // we'd rather hit that path once per cache window than every time the
-    // user opens the same card's detail drawer.
-    try {
-      localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: points }));
-    } catch {}
-
-    return points;
   } catch (e) {
-    console.error(e);
-    return [];
+    console.warn('[catalog] history proxy fetch failed', e);
   }
+
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: points }));
+  } catch {}
+
+  return points;
 };
 
 // Sort bucket: lower number = appears first.

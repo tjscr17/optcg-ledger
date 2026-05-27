@@ -40,6 +40,61 @@ export default defineConfig(({ mode }) => {
           });
         },
       },
+      // Local-dev mirror of /api/optcg-history. OPTCGAPI's twoweeks endpoint
+      // returns 500 without CORS headers for cards it has no history for —
+      // proxying through here means the browser only sees our 200 + empty
+      // points array.
+      {
+        name: 'optcg-history-dev-proxy',
+        configureServer(server) {
+          const API = 'https://optcgapi.com/api';
+          const normalizePoints = (data) => {
+            if (!Array.isArray(data)) return [];
+            return data
+              .map(d => ({
+                date: d.date_scraped || d.date || d.scrape_date,
+                price: Number(d.market_price ?? d.inventory_price) || 0,
+              }))
+              .filter(p => p.date && p.price > 0)
+              .sort((a, b) => a.date.localeCompare(b.date));
+          };
+          const fetchJSON = async (url) => {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+            return r.json();
+          };
+          server.middlewares.use('/api/optcg-history', async (req, res) => {
+            const url = new URL(req.url, 'http://localhost');
+            res.setHeader('Content-Type', 'application/json');
+            const id = (url.searchParams.get('id') || '').trim();
+            if (!id) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: 'id query param required' }));
+              return;
+            }
+            let queryId = id.split('__')[0].replace(/_p\d+$/i, '');
+            const canonical = queryId.match(/^[A-Z]+\d+-\d+/i);
+            queryId = canonical ? canonical[0] : queryId;
+
+            for (const path of [
+              `${API}/sets/card/twoweeks/${queryId}/`,
+              `${API}/decks/card/twoweeks/${queryId}/`,
+              `${API}/promos/card/twoweeks/${queryId}/`,
+            ]) {
+              try {
+                const data = await fetchJSON(path);
+                if (Array.isArray(data) && data.length > 0) {
+                  res.statusCode = 200;
+                  res.end(JSON.stringify({ id: queryId, points: normalizePoints(data) }));
+                  return;
+                }
+              } catch {}
+            }
+            res.statusCode = 200;
+            res.end(JSON.stringify({ id: queryId, points: [] }));
+          });
+        },
+      },
       // Local-dev mirror of /api/tcgcsv. Same caching semantics as the
       // Vercel function — module-level Maps live for the dev server's
       // lifetime, which is usually more forgiving than serverless cold
