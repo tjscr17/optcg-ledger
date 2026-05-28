@@ -9,7 +9,7 @@ import {
   searchTcgProducts, saveResolution, getResolution, clearResolution, cardNumberFromCanonical,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions,
-  autoResolveCard, getTcgId, pickBestMatchForCard,
+  autoResolveCard, getTcgId, pickBestMatchForCard, confidentMatchForCard,
   diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
 } from './pricing.js';
 
@@ -3073,11 +3073,14 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
         return;
       }
       const saved = getResolution(currentCid);
-      // If there's exactly one TCGPlayer match AND we haven't already
-      // resolved this card to a different product, save it automatically —
-      // the user has nothing to decide here.
-      if (matches.length === 1 && (!saved || saved.tcg_id === matches[0].tcg_id)) {
-        saveResolution(currentCid, matches[0]);
+      // Auto-resolve when the match is UNAMBIGUOUS — exactly one candidate
+      // matches this card's set + parallel flag (TCGCSV returns every
+      // printing of a number, so "one product" is rare; "one printing that's
+      // actually this card" is the useful test). Skip auto if we've already
+      // resolved to a different product (respect the manual pick).
+      const confident = confidentMatchForCard(currentCard, matches);
+      if (confident && (!saved || saved.tcg_id === confident.tcg_id)) {
+        saveResolution(currentCid, confident);
         if (currentReport) clearMatchReport(currentCid);
         setResolveRev(r => r + 1);
         // In removal queues the card drops out and the next one shifts into

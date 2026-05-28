@@ -262,6 +262,26 @@ export const pickBestMatchForCard = (card, products) => {
   return scored[0]?.product || null;
 };
 
+// Returns a TCGPlayer product ONLY when the match is unambiguous — i.e.
+// exactly one candidate matches both the card's source set and its parallel
+// flag (or there's literally one product for the number). Returns null when
+// the choice is ambiguous (multiple set+parallel matches, or none) so the
+// caller knows to stop and ask the user. This is the bar for "auto-resolve
+// without confirmation."
+export const confidentMatchForCard = (card, products) => {
+  if (!card || !Array.isArray(products) || products.length === 0) return null;
+  if (products.length === 1) return products[0];
+  const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
+  const wantsParallel = Boolean(card.isParallel);
+  const exact = products.filter(p => {
+    const abbrNorm = (p.group_abbreviation || '').replace(/-/g, '').toUpperCase();
+    const setMatch = cardSetNorm && abbrNorm && abbrNorm === cardSetNorm;
+    const parallelMatch = Boolean(p.is_parallel) === wantsParallel;
+    return setMatch && parallelMatch;
+  });
+  return exact.length === 1 ? exact[0] : null;
+};
+
 // Resolve a card by searching TCGCSV and picking the best match (set +
 // parallel flag aware). Persists the result via saveResolution so future
 // reads hit the cache. Returns the picked product or null. No-op if the
