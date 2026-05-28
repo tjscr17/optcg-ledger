@@ -6,7 +6,7 @@ import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
-  searchTcgProducts, saveResolution, getResolution, cardNumberFromCanonical,
+  searchTcgProducts, saveResolution, getResolution, clearResolution, cardNumberFromCanonical,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions,
   autoResolveCard, getTcgId, pickBestMatchForCard,
@@ -3066,19 +3066,30 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       setCandidates(matches);
       if (matches.length === 0) {
         setError(`No TCGPlayer match for ${number}.`);
-      } else {
-        const saved = getResolution(currentCid);
-        const chosen = (saved && matches.find(v => v.tcg_id === saved.tcg_id))
-          || pickBestMatchForCard(currentCard, matches)
-          || matches[0];
-        setSelectedPickId(String(chosen.tcg_id));
+        return;
       }
+      const saved = getResolution(currentCid);
+      // If there's exactly one TCGPlayer match AND we haven't already
+      // resolved this card to a different product, save it automatically
+      // and advance — the user has nothing to decide here.
+      if (matches.length === 1 && (!saved || saved.tcg_id === matches[0].tcg_id)) {
+        saveResolution(currentCid, matches[0]);
+        if (currentReport) clearMatchReport(currentCid);
+        setResolveRev(r => r + 1);
+        setIndex(i => i + 1);
+        return;
+      }
+      const chosen = (saved && matches.find(v => v.tcg_id === saved.tcg_id))
+        || pickBestMatchForCard(currentCard, matches)
+        || matches[0];
+      setSelectedPickId(String(chosen.tcg_id));
     }).catch(e => {
       if (!cancelled) setError(e.message || 'Failed to load TCGCSV matches.');
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentCard, currentCid]);
 
   const selected = candidates.find(v => String(v.tcg_id) === selectedPickId);
@@ -3732,6 +3743,15 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
   const isWatched = Boolean(watchEntry);
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+  // Force re-read of resolution / report state when the user takes an action
+  // (report / clear / re-resolve). Local state since the global variantRev
+  // doesn't bump on report changes.
+  const [, bumpResolutionTick] = useReducer(x => x + 1, 0);
+
+  const cid = card.canonicalId || card.id;
+  const resolution = getResolution(cid);
+  const diagnostic = diagnoseResolution(card, resolution);
+  const report = getMatchReport(cid);
 
   useEffect(() => {
     let cancelled = false;
@@ -3750,6 +3770,30 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
     const first = history[0].price, last = history[history.length - 1].price;
     return first > 0 ? ((last - first) / first) * 100 : 0;
   }, [history]);
+
+  const handleReportMatch = () => {
+    const note = prompt(
+      'Report bad TCGPlayer match — optional note ("alt art, not the base", etc.):',
+      report?.note || ''
+    );
+    if (note === null) return; // user cancelled
+    reportBadMatch(cid, note);
+    bumpResolutionTick();
+  };
+  const handleClearReport = () => {
+    clearMatchReport(cid);
+    bumpResolutionTick();
+  };
+  const handleReResolve = async () => {
+    if (!confirm('Forget the current TCGPlayer match for this card? The next viewport pass will auto-resolve it again from TCGCSV, or you can pick manually in the Resolve view.')) return;
+    clearResolution(cid);
+    clearMatchReport(cid);
+    bumpResolutionTick();
+    // Kick off a fresh auto-resolve so the price comes back without
+    // requiring a viewport hit.
+    await autoResolveCard(card);
+    bumpResolutionTick();
+  };
 
   return (
     <div className="op-drawer-backdrop" onClick={onClose}>
@@ -3781,6 +3825,60 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
               tone={trend >= 0 ? 'pos' : 'neg'}
             />
           </div>
+
+          <div className="op-section-title">
+            <RefreshCw size={15} /> TCGPlayer match
+          </div>
+          {resolution ? (
+            <div className={`op-resolve-diag ${diagnostic.issues.length > 0 ? 'has-issues' : 'is-ok'}`}>
+              <div className="op-resolve-diag-row">
+                <span>Pick</span>
+                <strong>{resolution.name || '(unnamed)'}</strong>
+              </div>
+              <div className="op-resolve-diag-row">
+                <span>Set · parallel</span>
+                <strong className={(!diagnostic.parallelMatch || diagnostic.setMatch === false) ? 'is-warn' : ''}>
+                  {resolution.group_abbreviation || '?'}
+                  {resolution.group_name ? ` · ${resolution.group_name}` : ''}
+                  {' · '}
+                  {resolution.is_parallel ? 'Parallel' : 'Base'}
+                </strong>
+              </div>
+              {resolution.tcgplayer_url && (
+                <div className="op-resolve-diag-row">
+                  <span>TCGPlayer</span>
+                  <a className="op-resolve-side-link" href={resolution.tcgplayer_url} target="_blank" rel="noreferrer">
+                    Open product ↗
+                  </a>
+                </div>
+              )}
+              {report && (
+                <div className="op-resolve-diag-report">
+                  <strong>⚑ You reported this</strong> on {new Date(report.reported_at).toLocaleDateString()}
+                  {report.note && <> — "{report.note}"</>}
+                </div>
+              )}
+              <div className="op-drawer-actions" style={{ marginTop: 8, gap: 6 }}>
+                {!report && (
+                  <button className="op-btn-ghost" onClick={handleReportMatch} title="Flag this match as wrong — it'll show up in the Resolve view's Reported queue">
+                    ⚑ Report bad match
+                  </button>
+                )}
+                {report && (
+                  <button className="op-btn-ghost" onClick={handleClearReport} title="Clear the report flag">
+                    Clear flag
+                  </button>
+                )}
+                <button className="op-btn-ghost" onClick={handleReResolve} title="Forget the current pick and auto-resolve again">
+                  <RefreshCw size={14} /> Re-resolve
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="op-empty-mini">
+              No TCGPlayer pick saved yet. Visit the Resolve view, or just open the card from search — auto-resolve fires on viewport entry.
+            </div>
+          )}
 
           <div className="op-section-title"><BarChart3 size={15} /> 14-day price history</div>
           {historyLoading ? (
