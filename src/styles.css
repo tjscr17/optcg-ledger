@@ -777,7 +777,18 @@ body { background: var(--paper); }
 .op-cert-val { font-family: var(--body); font-size: 13px; color: var(--ink); }
 .op-cert-match {
   display: grid; grid-template-columns: 80px 1fr; gap: 14px;
+  /* Don't stretch cells to the row height — the meta column is much taller
+     than the card image and was making the img stretch + crop. */
+  align-items: start;
   padding: 12px; background: var(--paper); border: 1px solid var(--line-strong);
+}
+/* CardArt renders a bare <img class="op-card-art-img"> with width:100% /
+   height:100% / object-fit:cover — those rules are right for the SearchView
+   tiles, wrong for fixed-size thumbnails. Pin the thumbnail aspect here. */
+.op-cert-match > .op-card-art-img,
+.op-cert-match > .op-card-art-fallback {
+  width: 80px; height: auto; aspect-ratio: 5 / 7;
+  align-self: start;
 }
 .op-cert-match-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .op-cert-match-name {
@@ -1046,15 +1057,67 @@ body { background: var(--paper); }
   margin-bottom: 14px; letter-spacing: 0.08em; text-transform: uppercase;
 }
 .op-resolve-card {
-  display: grid; grid-template-columns: 260px 1fr; gap: 28px;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 28px;
   background: var(--paper); border: 1px solid var(--line-strong);
   padding: 22px;
 }
 .op-resolve-art {
   aspect-ratio: 5 / 7; background: var(--ink);
   overflow: hidden; cursor: pointer;
+  max-width: 220px;
 }
+.op-resolve-side { display: flex; flex-direction: column; gap: 10px; }
+.op-resolve-side-meta { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.op-resolve-side-id {
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.1em; color: var(--ink-soft);
+}
+.op-resolve-side-name {
+  font-family: var(--display); font-weight: 600; font-size: 18px; line-height: 1.2;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.op-resolve-side-sub { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
+.op-resolve-side-link {
+  font-family: var(--mono); font-size: 11px; color: var(--berry);
+  text-decoration: underline; margin-top: 4px;
+}
+.op-resolve-side-link:hover { color: var(--berry-deep); }
 .op-resolve-meta { display: flex; flex-direction: column; gap: 10px; }
+
+/* Candidate picker — replaces the dropdown so the user can see each option's
+   set, parallel flag, rarity, and price at once. */
+.op-resolve-candidates {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 360px; overflow-y: auto;
+  border: 1px solid var(--line);
+}
+.op-resolve-candidate {
+  text-align: left; padding: 8px 12px; background: var(--paper);
+  border: none; border-bottom: 1px solid var(--line);
+  cursor: pointer; color: var(--ink);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.op-resolve-candidate:last-child { border-bottom: none; }
+.op-resolve-candidate:hover { background: var(--paper-warm); }
+.op-resolve-candidate.is-active {
+  background: var(--ink); color: var(--paper);
+}
+.op-resolve-candidate.is-active * { color: inherit; }
+.op-resolve-candidate-name { font-family: var(--display); font-weight: 600; font-size: 13px; }
+.op-resolve-candidate-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10px;
+}
+.op-resolve-candidate-tag {
+  padding: 1px 6px; border: 1px solid var(--line-strong);
+  color: var(--ink-soft); background: transparent;
+}
+.op-resolve-candidate-tag.is-warn { color: var(--berry-deep); border-color: var(--berry-deep); }
+.op-resolve-candidate-tag.is-ok { color: var(--jade); border-color: var(--jade); }
+.op-resolve-candidate.is-active .op-resolve-candidate-tag { border-color: var(--paper-warm); }
+.op-resolve-candidate-price {
+  margin-left: auto; font-weight: 700; color: var(--ink);
+}
 .op-resolve-name {
   font-family: var(--display); font-weight: 600; font-size: 28px; line-height: 1.1;
   margin-top: 2px;
@@ -1103,7 +1166,6 @@ body { background: var(--paper); }
 
 @media (max-width: 700px) {
   .op-resolve-card { grid-template-columns: 1fr; }
-  .op-resolve-art { max-width: 220px; }
 }
 
 /* RESPONSIVE */

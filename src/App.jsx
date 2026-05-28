@@ -3196,63 +3196,110 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
           </div>
 
           <div className="op-resolve-card">
-            <div className="op-resolve-art" onClick={() => onCardClick(currentCard)} role="button">
-              <CardArt card={currentCard} needsVariant />
+            <div className="op-resolve-side">
+              <div className="op-eyebrow">OPTCG catalog</div>
+              <div className="op-resolve-art" onClick={() => onCardClick(currentCard)} role="button">
+                <CardArt card={currentCard} needsVariant />
+              </div>
+              <div className="op-resolve-side-meta">
+                <div className="op-resolve-side-id">{currentCard.displayId || currentCard.id}</div>
+                <div className="op-resolve-side-name">
+                  {currentCard.name}
+                  <VariantPill variant={currentCard.variant} />
+                </div>
+                <div className="op-resolve-side-sub">
+                  {currentCard.setName}{currentCard.originalSetId && currentCard.originalSetId !== currentCard.setId ? ` (orig ${currentCard.originalSetId})` : ''}
+                </div>
+                <div className="op-resolve-side-sub">
+                  {RARITY_LABELS[currentCard.rarity] || currentCard.rarity}
+                  {currentCard.isParallel && ' · Parallel'}
+                </div>
+                <div className="op-resolve-side-sub">
+                  Raw: ${effectiveRawPrice(currentCard).toFixed(2)}
+                </div>
+              </div>
             </div>
-            <div className="op-resolve-meta">
-              <div className="op-eyebrow">{currentCard.displayId || currentCard.id} · {currentCard.setName}</div>
-              <div className="op-resolve-name">
-                {currentCard.name}
-                <VariantPill variant={currentCard.variant} />
-              </div>
-              <div className="op-resolve-sub">
-                {RARITY_LABELS[currentCard.rarity] || currentCard.rarity} · Raw: ${effectiveRawPrice(currentCard).toFixed(2)}
-              </div>
 
-              <Field label="TCGPlayer printing">
-                <div className="op-variant-row">
-                  <select
-                    value={selectedPickId}
-                    onChange={(e) => setSelectedPickId(e.target.value)}
-                    disabled={loading || candidates.length === 0}
-                  >
-                    {loading && <option>Loading matches…</option>}
-                    {!loading && candidates.length === 0 && <option value="">No matches</option>}
-                    {candidates.map(v => {
-                      const price = v.market_price != null ? `$${Number(v.market_price).toFixed(2)}` : 'no price';
-                      return (
-                        <option key={v.tcg_id} value={String(v.tcg_id)}>
-                          {v.name}{v.is_parallel ? ' [parallel]' : ''} · {price}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </div>
-              </Field>
+            <div className="op-resolve-side">
+              <div className="op-eyebrow">TCGPlayer pick</div>
+              <div className="op-resolve-art">
+                {selected?.image_url
+                  ? <img src={selected.image_url} alt={selected.name} className="op-card-art-img" />
+                  : <div className="op-card-art-fallback"><ImageOff size={28} opacity={0.4} /></div>}
+              </div>
+              <div className="op-resolve-side-meta">
+                {selected ? (
+                  <>
+                    <div className="op-resolve-side-name">
+                      {selected.name}
+                      {selected.is_parallel && <span className="op-variant-pill">Parallel</span>}
+                    </div>
+                    <div className="op-resolve-side-sub">
+                      {selected.group_abbreviation || '?'}{selected.group_name ? ` · ${selected.group_name}` : ''}
+                    </div>
+                    <div className="op-resolve-side-sub">
+                      {selected.rarity || '?'} · {selected.sub_type_name || '?'}
+                    </div>
+                    <div className="op-resolve-side-sub">
+                      Market: {selected.market_price != null ? `$${Number(selected.market_price).toFixed(2)}` : '—'}
+                      {selected.low_price != null && (
+                        <> · L/M/H ${Number(selected.low_price).toFixed(2)}/${Number(selected.mid_price).toFixed(2)}/${Number(selected.high_price).toFixed(2)}</>
+                      )}
+                    </div>
+                    {selected.tcgplayer_url && (
+                      <a className="op-resolve-side-link" href={selected.tcgplayer_url} target="_blank" rel="noreferrer">
+                        Open on TCGPlayer ↗
+                      </a>
+                    )}
+                  </>
+                ) : (
+                  <div className="op-resolve-side-sub">Pick a candidate below.</div>
+                )}
+              </div>
+            </div>
+          </div>
 
-              {selected && (
-                <div className="op-resolve-prices">
-                  <div className="op-resolve-price-row">
-                    <span className="op-resolve-price-label">Market</span>
-                    <span className="op-resolve-price-val">
-                      {selected.market_price != null ? `$${Number(selected.market_price).toFixed(2)}` : '—'}
-                    </span>
-                  </div>
-                  <div className="op-resolve-price-row">
-                    <span className="op-resolve-price-label">Low / Mid / High</span>
-                    <span className="op-resolve-price-val">
-                      {[selected.low_price, selected.mid_price, selected.high_price]
-                        .map(p => p != null ? `$${Number(p).toFixed(2)}` : '—').join(' / ')}
-                    </span>
-                  </div>
-                  <div className="op-resolve-price-row">
-                    <span className="op-resolve-price-label">Rarity · type · set</span>
-                    <span className="op-resolve-price-val">
-                      {(selected.rarity || '—')} · {selected.sub_type_name || '—'} · {selected.group_abbreviation || '?'}
-                    </span>
-                  </div>
-                </div>
-              )}
+          <Field label={`TCGPlayer printing (${candidates.length} candidate${candidates.length === 1 ? '' : 's'})`}>
+            {loading ? (
+              <div className="op-resolve-side-sub">Loading matches…</div>
+            ) : candidates.length === 0 ? (
+              <div className="op-resolve-side-sub">No TCGCSV matches — check the card number or use the manual search elsewhere.</div>
+            ) : (
+              <div className="op-resolve-candidates">
+                {candidates.map(v => {
+                  const isPicked = String(v.tcg_id) === selectedPickId;
+                  const setMatch = v.group_abbreviation &&
+                    v.group_abbreviation.replace(/-/g, '').toUpperCase() === (currentCard.setId || '').replace(/-/g, '').toUpperCase();
+                  const parallelMatch = Boolean(v.is_parallel) === Boolean(currentCard.isParallel);
+                  return (
+                    <button
+                      key={v.tcg_id}
+                      type="button"
+                      className={`op-resolve-candidate ${isPicked ? 'is-active' : ''}`}
+                      onClick={() => setSelectedPickId(String(v.tcg_id))}
+                    >
+                      <div className="op-resolve-candidate-name">{v.name}</div>
+                      <div className="op-resolve-candidate-meta">
+                        <span className={`op-resolve-candidate-tag ${setMatch ? 'is-ok' : 'is-warn'}`}>
+                          {v.group_abbreviation || '?'}{v.group_name ? ` — ${v.group_name}` : ''}
+                        </span>
+                        <span className={`op-resolve-candidate-tag ${parallelMatch ? 'is-ok' : 'is-warn'}`}>
+                          {v.is_parallel ? 'Parallel' : 'Base'}
+                        </span>
+                        <span className="op-resolve-candidate-tag">
+                          {v.rarity || '?'}
+                          {v.sub_type_name && v.sub_type_name !== 'Normal' ? ` · ${v.sub_type_name}` : ''}
+                        </span>
+                        <span className="op-resolve-candidate-price">
+                          {v.market_price != null ? `$${Number(v.market_price).toFixed(2)}` : 'no price'}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </Field>
 
               {/* Diagnostics: surfaces why this card is in the queue / what's
                   off about its current resolution. Only shown when there IS
@@ -3317,17 +3364,15 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                 </details>
               )}
 
-              {error && <div className="op-graded-error">{error}</div>}
+          {error && <div className="op-graded-error">{error}</div>}
 
-              <div className="op-resolve-actions">
-                <button className="op-btn-ghost" onClick={handleBack} disabled={index === 0}>← Back</button>
-                <button className="op-btn-ghost" onClick={handleSkip}>Skip</button>
-                <button className="op-btn-primary" onClick={handleSave} disabled={!selected || loading}>
-                  Save &amp; Next →
-                </button>
-                <button className="op-btn-ghost" onClick={() => onAddCard(currentCard)}>Add to collection</button>
-              </div>
-            </div>
+          <div className="op-resolve-actions">
+            <button className="op-btn-ghost" onClick={handleBack} disabled={index === 0}>← Back</button>
+            <button className="op-btn-ghost" onClick={handleSkip}>Skip</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={!selected || loading}>
+              Save &amp; Next →
+            </button>
+            <button className="op-btn-ghost" onClick={() => onAddCard(currentCard)}>Add to collection</button>
           </div>
         </div>
       )}

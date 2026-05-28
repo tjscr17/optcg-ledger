@@ -113,6 +113,7 @@ export default defineConfig(({ mode }) => {
           let productIndex = null;
           let productsByNumber = null;
           let groupAbbrIndex = null;
+          let groupNameIndex = null;
           let indexFetchedAt = 0;
           let indexPromise = null;
           const groupPricesCache = new Map();
@@ -141,6 +142,7 @@ export default defineConfig(({ mode }) => {
             name: p.name || '',
             cleanName: p.cleanName || '',
             imageUrl: p.imageUrl || '',
+            url: p.url || '',
             number: extField(p.extendedData, 'Number'),
             rarity: extField(p.extendedData, 'Rarity'),
             isParallel: detectIsParallel(p.name),
@@ -155,8 +157,10 @@ export default defineConfig(({ mode }) => {
               const byId = new Map();
               const byNumber = new Map();
               const abbrIdx = new Map();
+              const nameIdx = new Map();
               for (const g of groups.results || []) {
                 if (g.abbreviation) abbrIdx.set(g.groupId, g.abbreviation);
+                if (g.name) nameIdx.set(g.groupId, g.name);
                 try {
                   const products = await fetchJSON(`${TCGCSV_BASE}/${CATEGORY_ID}/${g.groupId}/products`);
                   for (const p of products.results || []) {
@@ -177,6 +181,7 @@ export default defineConfig(({ mode }) => {
               productIndex = byId;
               productsByNumber = byNumber;
               groupAbbrIndex = abbrIdx;
+              groupNameIndex = nameIdx;
               indexFetchedAt = Date.now();
               return byId;
             })().finally(() => { indexPromise = null; });
@@ -212,9 +217,11 @@ export default defineConfig(({ mode }) => {
               tcg_id: tcgId,
               group_id: info.groupId,
               group_abbreviation: groupAbbrIndex?.get(info.groupId) || '',
+              group_name: groupNameIndex?.get(info.groupId) || '',
               name: info.name,
               clean_name: info.cleanName,
               image_url: info.imageUrl,
+              tcgplayer_url: info.url,
               number: info.number,
               rarity: info.rarity,
               is_parallel: info.isParallel,
