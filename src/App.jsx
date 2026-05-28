@@ -2941,7 +2941,11 @@ function TransactionRow({ tx, collection, onDelete }) {
 
 // ============================================================================
 function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
-  const [filterMode, setFilterMode] = useState('unresolved'); // 'unresolved' | 'in-collection' | 'all'
+  const [filterMode, setFilterMode] = useState('unresolved'); // 'unresolved' | 'in-collection' | 'issues' | 'reported' | 'all'
+  // In these queues, resolving a card makes it no longer qualify, so it
+  // drops out and the next card slides into the current index. We must NOT
+  // advance the index after a save in these modes, or we'd skip a card.
+  // ('all' / 'in-collection' keep resolved cards, so we do advance there.)
   const [index, setIndex] = useState(0);
 
   // Bulk prefetch state
@@ -3070,13 +3074,16 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       }
       const saved = getResolution(currentCid);
       // If there's exactly one TCGPlayer match AND we haven't already
-      // resolved this card to a different product, save it automatically
-      // and advance — the user has nothing to decide here.
+      // resolved this card to a different product, save it automatically —
+      // the user has nothing to decide here.
       if (matches.length === 1 && (!saved || saved.tcg_id === matches[0].tcg_id)) {
         saveResolution(currentCid, matches[0]);
         if (currentReport) clearMatchReport(currentCid);
         setResolveRev(r => r + 1);
-        setIndex(i => i + 1);
+        // In removal queues the card drops out and the next one shifts into
+        // this index — don't advance. Elsewhere, step forward.
+        const removal = filterMode === 'unresolved' || filterMode === 'issues' || filterMode === 'reported';
+        if (!removal) setIndex(i => i + 1);
         return;
       }
       const chosen = (saved && matches.find(v => v.tcg_id === saved.tcg_id))
@@ -3100,14 +3107,21 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   // Reset note input when the user moves to a different card.
   useEffect(() => { setReportNote(''); }, [currentCid]);
 
+  // Queues where a resolved card disappears from the list.
+  const isRemovalQueue = filterMode === 'unresolved' || filterMode === 'issues' || filterMode === 'reported';
+
   const handleSave = () => {
     if (selected && currentCard) {
       saveResolution(currentCid, selected);
       // Saving a new pick implicitly resolves the report — clear it.
       if (currentReport) clearMatchReport(currentCid);
       setResolveRev(r => r + 1);
+      // In removal queues the saved card drops out and the next one shifts
+      // into this index, so leave index alone. Elsewhere, advance.
+      if (!isRemovalQueue) setIndex(i => i + 1);
+    } else {
+      setIndex(i => i + 1);
     }
-    setIndex(i => i + 1);
   };
   const handleSkip = () => setIndex(i => i + 1);
   const handleBack = () => setIndex(i => Math.max(0, i - 1));
