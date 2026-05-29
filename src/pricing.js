@@ -412,8 +412,25 @@ export const saveResolution = (cardId, productSummary) => {
     store.upsertResolution(cardId, {
       tcg_id: String(tcgId),
       snapshot: summary,
-    }).catch(() => {});
+    }).then((ok) => { if (ok === false) warnResolutionPersistFailed(); })
+      .catch(() => warnResolutionPersistFailed());
   }
+};
+
+// In shared mode the card_resolutions upsert is the durable store. If it fails
+// (almost always a schema problem on the remote table), resolutions silently
+// vanish on refresh and bulk "Auto-resolve all" re-runs every load. Surface a
+// single, actionable error rather than 3602 generic ones during a bulk pass.
+let warnedResolutionPersist = false;
+const warnResolutionPersistFailed = () => {
+  if (warnedResolutionPersist) return;
+  warnedResolutionPersist = true;
+  console.error(
+    '[resolutions] Supabase upsert to `card_resolutions` failed — your resolutions ' +
+    'will NOT persist across refreshes. Most likely the remote table is missing the ' +
+    '`snapshot` jsonb column or the `unique (vault_key, card_id)` constraint that the ' +
+    'upsert needs for onConflict. See the schema SQL in src/storage.js.'
+  );
 };
 
 // Local-only flag store for cards whose resolution looks wrong. Used by the

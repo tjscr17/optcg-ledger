@@ -248,6 +248,7 @@ const shared = {
         { onConflict: 'vault_key,card_id' }
       );
     if (error) console.error('upsertResolution failed', error);
+    return !error;
   },
   subscribeResolutions(callback) {
     const channel = supa
