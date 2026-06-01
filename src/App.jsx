@@ -12,6 +12,7 @@ import {
   getHydratedResolutionCount,
   autoResolveCard, getTcgId, pickBestMatchForCard, confidentMatchForCard,
   diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
+  onMatchReportChanged,
 } from './pricing.js';
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
@@ -2943,6 +2944,7 @@ function TransactionRow({ tx, collection, onDelete }) {
 // ============================================================================
 function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const [filterMode, setFilterMode] = useState('unresolved'); // 'unresolved' | 'in-collection' | 'issues' | 'reported' | 'all'
+  const [search, setSearch] = useState('');
   // In these queues, resolving a card makes it no longer qualify, so it
   // drops out and the next card slides into the current index. We must NOT
   // advance the index after a save in these modes, or we'd skip a card.
@@ -2970,6 +2972,11 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     whenResolutionsReady().then(() => { if (!cancelled) setResolveRev(r => r + 1); });
     return () => { cancelled = true; };
   }, []);
+
+  // Re-derive counts/queue when a report is written or cleared from anywhere
+  // (e.g., the detail drawer overlaid on this view). Without this the Reported
+  // queue stays stale until the user touches a local control.
+  useEffect(() => onMatchReportChanged(() => setResolveRev(r => r + 1)), []);
 
   const cidOf = (c) => c.canonicalId || c.id;
   const isResolved = (c) => Boolean(getResolution(cidOf(c)));
@@ -3001,23 +3008,35 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   }, [catalog, resolveRev]);
 
   const queue = useMemo(() => {
+    let base;
     if (filterMode === 'in-collection') {
       // entries.card_id is canonical post-migration; match against canonicalId.
       const ids = new Set(entries.map(e => e.card_id));
-      return catalog.filter(c => ids.has(cidOf(c)));
+      base = catalog.filter(c => ids.has(cidOf(c)));
+    } else if (filterMode === 'unresolved') {
+      base = catalog.filter(c => !isResolved(c));
+    } else if (filterMode === 'issues') {
+      base = catalog.filter(c => hasIssues(c));
+    } else if (filterMode === 'reported') {
+      base = catalog.filter(c => isReported(c));
+    } else {
+      base = catalog;
     }
-    if (filterMode === 'unresolved') {
-      return catalog.filter(c => !isResolved(c));
-    }
-    if (filterMode === 'issues') {
-      return catalog.filter(c => hasIssues(c));
-    }
-    if (filterMode === 'reported') {
-      return catalog.filter(c => isReported(c));
-    }
-    return catalog;
+    const q = search.trim().toLowerCase();
+    if (!q) return base;
+    // Searches OPTCG identity (name, display id, set name) AND the saved
+    // TCGPlayer pick name — so you can find a card by either side.
+    return base.filter(c => {
+      if ((c.name || '').toLowerCase().includes(q)) return true;
+      if ((c.displayId || '').toLowerCase().includes(q)) return true;
+      if ((c.id || '').toLowerCase().includes(q)) return true;
+      if ((c.setName || '').toLowerCase().includes(q)) return true;
+      const r = getResolution(cidOf(c));
+      if (r && (r.name || '').toLowerCase().includes(q)) return true;
+      return false;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalog, entries, filterMode, resolveRev]);
+  }, [catalog, entries, filterMode, resolveRev, search]);
 
   const runPrefetch = async () => {
     if (prefetching) return;
@@ -3070,7 +3089,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
 
   useEffect(() => {
     setIndex(0);
-  }, [filterMode]);
+  }, [filterMode, search]);
 
   useEffect(() => {
     setCandidates([]);
@@ -3198,6 +3217,17 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
           { v: 'reported', l: `Reported by me (${counts.reported.toLocaleString()})` },
           { v: 'all', l: `All cards (${counts.total.toLocaleString()})` },
         ]} />
+
+        <div className="op-filter-group" style={{ flex: 1, minWidth: 200 }}>
+          <div className="op-filter-label">Search</div>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Name, card number, set, or TCGPlayer pick…"
+            style={{ width: '100%', padding: '6px 10px', border: '1px solid var(--line-strong)', background: 'var(--paper)' }}
+          />
+        </div>
 
         <div className="op-filter-group">
           <div className="op-filter-label">Bulk</div>

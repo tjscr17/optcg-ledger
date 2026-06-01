@@ -461,6 +461,19 @@ const writeReports = (reports) => {
   try { localStorage.setItem(MATCH_REPORTS_KEY, JSON.stringify(reports)); } catch {}
 };
 
+// Pub/sub for match-report writes. The detail drawer can be opened on top of
+// the Resolve view (or anywhere else), so a report there needs to nudge any
+// view that derives its UI from `getMatchReport` — otherwise ResolveView's
+// counts/queue stay stale until the user touches a local control.
+const reportListeners = new Set();
+export const onMatchReportChanged = (cb) => {
+  reportListeners.add(cb);
+  return () => reportListeners.delete(cb);
+};
+const emitReportChanged = (cardId) => {
+  for (const cb of reportListeners) { try { cb(cardId); } catch {} }
+};
+
 // Flag a card's current resolution as a bad match. `note` is an optional
 // free-text hint the user types. Returns the saved report row.
 export const reportBadMatch = (cardId, note = '') => {
@@ -480,6 +493,7 @@ export const reportBadMatch = (cardId, note = '') => {
   };
   reports[cardId] = row;
   writeReports(reports);
+  emitReportChanged(cardId);
   return row;
 };
 
@@ -505,6 +519,7 @@ export const clearMatchReport = (cardId) => {
   if (reports[cardId]) {
     delete reports[cardId];
     writeReports(reports);
+    emitReportChanged(cardId);
   }
 };
 
