@@ -19,12 +19,22 @@ import {
   listUserVariants, addUserVariant, updateUserVariant, removeUserVariant,
   onPrintingAttributesChanged,
 } from './printing-attributes.js';
+import {
+  applyAttributeOverride, effectiveAttributesOf, addAttributeToCard,
+  removeAttributeFromCard, getCardAttributeOverride,
+  onCardAttributeOverridesChanged,
+} from './card-attribute-overrides.js';
 
-// Effective attribute keys for a card / product / resolution snapshot,
-// falling back to derived booleans on legacy objects that pre-date the
+// Effective attribute keys for a card / product / resolution snapshot.
+// For catalog cards (with `canonicalId`), per-card manual overrides apply on
+// top of the detected set. For products / resolution snapshots, just use
+// what's stored; the fallback covers legacy objects pre-dating the
 // attribute-list refactor.
 const attrsOf = (obj) => {
   if (!obj) return [];
+  if (obj.canonicalId && Array.isArray(obj.attributes)) {
+    return effectiveAttributesOf(obj);
+  }
   if (Array.isArray(obj.attributes)) return obj.attributes;
   const fallback = [];
   if (obj.isParallel || obj.is_parallel) fallback.push('parallel');
@@ -230,6 +240,10 @@ export default function App() {
   // from the PriceCharting era; semantically it's a "prices changed" tick.
   const [variantRev, setVariantRev] = useState(0);
   useEffect(() => onPriceResolved(() => setVariantRev(r => r + 1)), []);
+  // Bump variantRev when per-card attribute overrides change so every view
+  // that derives from card.attributes (pills, matching, diagnostics)
+  // re-renders without each one needing its own subscription.
+  useEffect(() => onCardAttributeOverridesChanged(() => setVariantRev(r => r + 1)), []);
   const augmentedCatalog = useMemo(
     () => augmentWithErrata(catalog),
     // erratTick is read inside augmentWithErrata via readErrataSet()
@@ -4021,6 +4035,19 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
   const diagnostic = diagnoseResolution(card, resolution);
   const report = getMatchReport(cid);
 
+  // Re-render when the user edits this card's classifications from inside
+  // the drawer (the pricing.js / catalog effective attribute lookups read
+  // from the override store directly, so we just need a re-render trigger).
+  useEffect(() => onCardAttributeOverridesChanged(() => bumpResolutionTick()), []);
+
+  // Classifications section state.
+  const detectedAttrs = Array.isArray(card.attributes) ? card.attributes : [];
+  const effectiveAttrs = effectiveAttributesOf(card);
+  const override = getCardAttributeOverride(cid);
+  const allAttrDefs = getPrintingAttributes();
+  const addableAttrs = allAttrDefs.filter(d => !effectiveAttrs.includes(d.key));
+  const removedAttrs = (override?.remove || []).filter(k => detectedAttrs.includes(k));
+
   const handleReportMatch = () => {
     const note = prompt(
       'Report bad TCGPlayer match — optional note ("alt art, not the base", etc.):',
@@ -4071,6 +4098,47 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
             {card.lowPrice > 0 && <PriceCell label="Low" value={`$${Number(card.lowPrice).toFixed(2)}`} />}
             {card.midPrice > 0 && <PriceCell label="Mid" value={`$${Number(card.midPrice).toFixed(2)}`} />}
             {card.highPrice > 0 && <PriceCell label="High" value={`$${Number(card.highPrice).toFixed(2)}`} />}
+          </div>
+
+          <div className="op-section-title"><Award size={15} /> Classifications</div>
+          <div className="op-variant-edit">
+            <div className="op-variant-edit-pills">
+              {effectiveAttrs.length === 0 ? (
+                <span className="op-resolve-side-sub">Base printing (no flags)</span>
+              ) : effectiveAttrs.map(k => {
+                const isDetected = detectedAttrs.includes(k);
+                return (
+                  <span key={k} className={`op-variant-pill ${isDetected ? '' : 'is-manual'}`}>
+                    {attrLabel(k)}
+                    {!isDetected && <span className="op-variant-pill-mark" title="Manually added">+</span>}
+                    <button
+                      className="op-variant-pill-x"
+                      onClick={() => removeAttributeFromCard(cid, k, isDetected)}
+                      title={isDetected ? `Override: this card is NOT ${attrLabel(k).toLowerCase()}` : `Remove ${attrLabel(k)}`}
+                    >×</button>
+                  </span>
+                );
+              })}
+              {removedAttrs.map(k => (
+                <span key={`r-${k}`} className="op-variant-pill is-removed" title="Detected but overridden off">
+                  <s>{attrLabel(k)}</s>
+                  <button className="op-variant-pill-x" onClick={() => addAttributeToCard(cid, k)} title="Restore">↺</button>
+                </span>
+              ))}
+            </div>
+            {addableAttrs.length > 0 && (
+              <div className="op-variant-edit-add">
+                <select
+                  value=""
+                  onChange={(e) => { if (e.target.value) addAttributeToCard(cid, e.target.value); }}
+                >
+                  <option value="">+ Add classification…</option>
+                  {addableAttrs.map(d => (
+                    <option key={d.key} value={d.key}>{d.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
           <div className="op-section-title">

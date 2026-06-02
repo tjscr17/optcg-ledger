@@ -16,6 +16,7 @@
 
 import { store, MODE } from './storage.js';
 import { getPrintingAttributes, detectPrintingAttributes } from './printing-attributes.js';
+import { applyAttributeOverride } from './card-attribute-overrides.js';
 
 const PRICE_CACHE_KEY = 'optcg:tcgcsv:prices:v1';
 const PRICE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — TCGCSV refreshes daily, this is generous
@@ -319,10 +320,16 @@ export const searchTcgProducts = async (displayId) => {
   }
 };
 
-// True if the card has the given attribute. Falls back to derived booleans
-// for legacy card objects (pre-attributes-refactor) that lack the array.
+// True if the card has the given attribute. Applies per-card user overrides
+// when the card carries a canonicalId; falls back to derived booleans for
+// legacy card objects (pre-attributes-refactor) that lack the array.
 const cardHasAttr = (card, key) => {
-  if (Array.isArray(card?.attributes)) return card.attributes.includes(key);
+  if (Array.isArray(card?.attributes)) {
+    const effective = card.canonicalId
+      ? applyAttributeOverride(card.canonicalId, card.attributes)
+      : card.attributes;
+    return effective.includes(key);
+  }
   if (key === 'parallel') return Boolean(card?.isParallel);
   if (key === 'manga') return Boolean(card?.isManga);
   return false;

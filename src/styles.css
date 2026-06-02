@@ -749,6 +749,27 @@ body { background: var(--paper); }
   vertical-align: middle;
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.op-variant-pill.is-manual {
+  background: var(--jade); color: #fff; border-color: var(--jade);
+}
+.op-variant-pill.is-removed {
+  background: transparent; color: var(--ink-soft); opacity: 0.6;
+}
+.op-variant-pill-mark {
+  margin-left: 4px; font-weight: 700;
+}
+.op-variant-pill-x {
+  margin-left: 4px; padding: 0 2px;
+  background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 11px; line-height: 1; font-weight: 700;
+}
+.op-variant-pill-x:hover { color: var(--rust); }
+.op-variant-edit { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+.op-variant-edit-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+.op-variant-edit-add select {
+  padding: 4px 8px; font-size: 12px;
+  border: 1px solid var(--line-strong); background: var(--paper);
+}
 .op-grade-badge.is-psa { background: var(--berry); }
 .op-grade-badge.is-bgs { background: var(--navy); }
 .op-grade-badge.is-bgs-black { background: #0a0a0a; color: var(--gold); border: 1px solid var(--gold); }
