@@ -6,11 +6,11 @@ import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
-  getResolution, clearResolution,
+  getResolution,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions, whenResolutionsReady,
   getHydratedResolutionCount,
-  autoResolveCard, getTcgId,
+  getTcgId,
   diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
   onMatchReportChanged,
 } from './pricing.js';
@@ -3844,8 +3844,6 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
   const [, bumpResolutionTick] = useReducer(x => x + 1, 0);
 
   const cid = card.canonicalId || card.id;
-  const resolution = getResolution(cid);
-  const diagnostic = diagnoseResolution(card, resolution);
   const report = getMatchReport(cid);
 
   // Re-render when the user edits this card's classifications from inside
@@ -3872,16 +3870,6 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
   };
   const handleClearReport = () => {
     clearMatchReport(cid);
-    bumpResolutionTick();
-  };
-  const handleReResolve = async () => {
-    if (!confirm('Forget the current TCGPlayer match for this card? The next viewport pass will auto-resolve it again from TCGCSV, or you can pick manually in the Resolve view.')) return;
-    clearResolution(cid);
-    clearMatchReport(cid);
-    bumpResolutionTick();
-    // Kick off a fresh auto-resolve so the price comes back without
-    // requiring a viewport hit.
-    await autoResolveCard(card);
     bumpResolutionTick();
   };
 
@@ -3955,59 +3943,52 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
           </div>
 
           <div className="op-section-title">
-            <RefreshCw size={15} /> TCGPlayer match
+            <DollarSign size={15} /> TCGPlayer
           </div>
-          {resolution ? (
-            <div className={`op-resolve-diag ${diagnostic.issues.length > 0 ? 'has-issues' : 'is-ok'}`}>
+          {/* The catalog card IS the TCGPlayer product post-2026-06-01.
+              Show the catalog's pick info directly; the resolution layer
+              is no longer the source of truth here. */}
+          <div className="op-resolve-diag is-ok">
+            <div className="op-resolve-diag-row">
+              <span>Product</span>
+              <strong>{card.fullName || card.name}</strong>
+            </div>
+            <div className="op-resolve-diag-row">
+              <span>Set · variant</span>
+              <strong>
+                {card.setId || '?'}
+                {card.setName && card.setName !== card.setId ? ` · ${card.setName}` : ''}
+                {attrsOf(card).length > 0
+                  ? attrsOf(card).map(k => ` · ${attrLabel(k)}`).join('')
+                  : ' · Base'}
+              </strong>
+            </div>
+            {card.tcgplayerUrl && (
               <div className="op-resolve-diag-row">
-                <span>Pick</span>
-                <strong>{resolution.name || '(unnamed)'}</strong>
+                <span>TCGPlayer</span>
+                <a className="op-resolve-side-link" href={card.tcgplayerUrl} target="_blank" rel="noreferrer">
+                  Open product ↗
+                </a>
               </div>
-              <div className="op-resolve-diag-row">
-                <span>Set · variant</span>
-                <strong className={diagnostic.issues.length > 0 ? 'is-warn' : ''}>
-                  {resolution.group_abbreviation || '?'}
-                  {resolution.group_name ? ` · ${resolution.group_name}` : ''}
-                  {attrsOf(resolution).length > 0
-                    ? attrsOf(resolution).map(k => ` · ${attrLabel(k)}`).join('')
-                    : ' · Base'}
-                </strong>
+            )}
+            {report && (
+              <div className="op-resolve-diag-report">
+                <strong>⚑ You reported this</strong> on {new Date(report.reported_at).toLocaleDateString()}
+                {report.note && <> — "{report.note}"</>}
               </div>
-              {resolution.tcgplayer_url && (
-                <div className="op-resolve-diag-row">
-                  <span>TCGPlayer</span>
-                  <a className="op-resolve-side-link" href={resolution.tcgplayer_url} target="_blank" rel="noreferrer">
-                    Open product ↗
-                  </a>
-                </div>
-              )}
-              {report && (
-                <div className="op-resolve-diag-report">
-                  <strong>⚑ You reported this</strong> on {new Date(report.reported_at).toLocaleDateString()}
-                  {report.note && <> — "{report.note}"</>}
-                </div>
-              )}
-              <div className="op-drawer-actions" style={{ marginTop: 8, gap: 6 }}>
-                {!report && (
-                  <button className="op-btn-ghost" onClick={handleReportMatch} title="Flag this match as wrong — it'll show up in the Resolve view's Reported queue">
-                    ⚑ Report bad match
-                  </button>
-                )}
-                {report && (
-                  <button className="op-btn-ghost" onClick={handleClearReport} title="Clear the report flag">
-                    Clear flag
-                  </button>
-                )}
-                <button className="op-btn-ghost" onClick={handleReResolve} title="Forget the current pick and auto-resolve again">
-                  <RefreshCw size={14} /> Re-resolve
+            )}
+            <div className="op-drawer-actions" style={{ marginTop: 8, gap: 6 }}>
+              {!report ? (
+                <button className="op-btn-ghost" onClick={handleReportMatch} title="Flag this card as wrong — shows up in Catalog → Reported queue">
+                  ⚑ Report bad card
                 </button>
-              </div>
+              ) : (
+                <button className="op-btn-ghost" onClick={handleClearReport} title="Clear the report flag">
+                  Clear flag
+                </button>
+              )}
             </div>
-          ) : (
-            <div className="op-empty-mini">
-              No TCGPlayer pick saved yet. Visit the Resolve view, or just open the card from search — auto-resolve fires on viewport entry.
-            </div>
-          )}
+          </div>
 
           <div className="op-section-title"><Folder size={15} /> Copies in your collections ({entries.length})</div>
           {entries.length === 0 ? (
