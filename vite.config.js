@@ -244,6 +244,9 @@ export default defineConfig(({ mode }) => {
             res.setHeader('Content-Type', 'application/json');
             const tcgIdRaw = url.searchParams.get('tcgId');
             const numberRaw = url.searchParams.get('number');
+            const groupAbbrRaw = url.searchParams.get('groupAbbr');
+            const allRaw = url.searchParams.get('all');
+            const groupsRaw = url.searchParams.get('groups');
 
             if (tcgIdRaw) {
               const tcgId = Number(tcgIdRaw);
@@ -326,8 +329,108 @@ export default defineConfig(({ mode }) => {
               return;
             }
 
+            if (groupAbbrRaw) {
+              const wanted = String(groupAbbrRaw).trim().toUpperCase().replace(/\s+/g, '');
+              if (!wanted) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'groupAbbr must be non-empty' }));
+                return;
+              }
+              try {
+                await ensureIndex();
+                let matchedGroupId = null;
+                let matchedAbbr = '';
+                let matchedName = '';
+                for (const [gid, abbr] of groupAbbrIndex.entries()) {
+                  if ((abbr || '').toUpperCase().replace(/\s+/g, '') === wanted) {
+                    matchedGroupId = gid;
+                    matchedAbbr = abbr;
+                    matchedName = groupNameIndex.get(gid) || '';
+                    break;
+                  }
+                }
+                if (!matchedGroupId) {
+                  res.statusCode = 404;
+                  res.end(JSON.stringify({ error: `no TCGPlayer group with abbreviation "${groupAbbrRaw}"` }));
+                  return;
+                }
+                const productIds = [];
+                for (const [pid, info] of productIndex.entries()) {
+                  if (info.groupId === matchedGroupId) productIds.push(pid);
+                }
+                const products = await Promise.all(productIds.map(async (id) => {
+                  const info = productIndex.get(id);
+                  if (!info) return null;
+                  return productPayload(id, info);
+                }));
+                const filtered = products.filter(Boolean);
+                filtered.sort((a, b) => (a.number || '').localeCompare(b.number || ''));
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  group_id: matchedGroupId,
+                  group_abbreviation: matchedAbbr,
+                  group_name: matchedName,
+                  products: filtered,
+                  fetched_at: new Date().toISOString(),
+                }));
+              } catch (e) {
+                res.statusCode = 502;
+                res.end(JSON.stringify({ error: `TCGCSV upstream failure: ${e.message || e}` }));
+              }
+              return;
+            }
+
+            if (groupsRaw) {
+              try {
+                await ensureIndex();
+                const groups = [];
+                for (const [gid, abbr] of groupAbbrIndex.entries()) {
+                  groups.push({
+                    group_id: gid,
+                    abbreviation: abbr,
+                    name: groupNameIndex.get(gid) || '',
+                  });
+                }
+                groups.sort((a, b) => (a.abbreviation || '').localeCompare(b.abbreviation || ''));
+                res.statusCode = 200;
+                res.end(JSON.stringify({ groups, fetched_at: new Date().toISOString() }));
+              } catch (e) {
+                res.statusCode = 502;
+                res.end(JSON.stringify({ error: `TCGCSV upstream failure: ${e.message || e}` }));
+              }
+              return;
+            }
+
+            if (allRaw) {
+              try {
+                await ensureIndex();
+                const ids = [...productIndex.keys()];
+                const products = await Promise.all(ids.map(async (id) => {
+                  const info = productIndex.get(id);
+                  if (!info) return null;
+                  return productPayload(id, info);
+                }));
+                const filtered = products.filter(Boolean);
+                filtered.sort((a, b) => {
+                  const ga = a.group_abbreviation || '', gb = b.group_abbreviation || '';
+                  if (ga !== gb) return ga.localeCompare(gb);
+                  return (a.number || '').localeCompare(b.number || '');
+                });
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  count: filtered.length,
+                  products: filtered,
+                  fetched_at: new Date().toISOString(),
+                }));
+              } catch (e) {
+                res.statusCode = 502;
+                res.end(JSON.stringify({ error: `TCGCSV upstream failure: ${e.message || e}` }));
+              }
+              return;
+            }
+
             res.statusCode = 400;
-            res.end(JSON.stringify({ error: 'one of ?tcgId=N or ?number=X is required' }));
+            res.end(JSON.stringify({ error: 'one of ?tcgId=N, ?number=X, ?groupAbbr=X, ?all=1, or ?groups=1 is required' }));
           });
         },
       },

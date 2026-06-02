@@ -176,6 +176,9 @@ const productPayload = async (tcgId, info) => {
 export default async function handler(req, res) {
   const tcgIdRaw = req.query?.tcgId;
   const numberRaw = req.query?.number;
+  const groupAbbrRaw = req.query?.groupAbbr;
+  const allRaw = req.query?.all;
+  const groupsRaw = req.query?.groups;
 
   // Dispatch on the params present.
   if (tcgIdRaw) {
@@ -262,5 +265,107 @@ export default async function handler(req, res) {
     return;
   }
 
-  res.status(400).json({ error: 'one of ?tcgId=N or ?number=X is required' });
+  if (groupAbbrRaw) {
+    // Returns every product belonging to a TCGPlayer group, identified by its
+    // abbreviation (case-insensitive, spaces tolerated — "OP14 RE", "OP14RE",
+    // "op14 re" all match). Used by the "Import from TCGPlayer" feature to
+    // pull entire release-event / tournament sets that OPTCGAPI doesn't ship.
+    const wanted = String(groupAbbrRaw).trim().toUpperCase().replace(/\s+/g, '');
+    if (!wanted) {
+      res.status(400).json({ error: 'groupAbbr must be non-empty' });
+      return;
+    }
+    try {
+      await ensureIndex();
+      let matchedGroupId = null;
+      let matchedAbbr = '';
+      let matchedName = '';
+      for (const [gid, abbr] of groupAbbrIndex.entries()) {
+        if ((abbr || '').toUpperCase().replace(/\s+/g, '') === wanted) {
+          matchedGroupId = gid;
+          matchedAbbr = abbr;
+          matchedName = groupNameIndex.get(gid) || '';
+          break;
+        }
+      }
+      if (!matchedGroupId) {
+        res.status(404).json({ error: `no TCGPlayer group with abbreviation "${groupAbbrRaw}"` });
+        return;
+      }
+      const productIds = [];
+      for (const [pid, info] of productIndex.entries()) {
+        if (info.groupId === matchedGroupId) productIds.push(pid);
+      }
+      const products = await Promise.all(productIds.map(async (id) => {
+        const info = productIndex.get(id);
+        if (!info) return null;
+        return productPayload(id, info);
+      }));
+      const filtered = products.filter(Boolean);
+      filtered.sort((a, b) => (a.number || '').localeCompare(b.number || ''));
+      res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
+      res.status(200).json({
+        group_id: matchedGroupId,
+        group_abbreviation: matchedAbbr,
+        group_name: matchedName,
+        products: filtered,
+        fetched_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      res.status(502).json({ error: `TCGCSV upstream failure: ${e.message || e}` });
+    }
+    return;
+  }
+
+  if (groupsRaw) {
+    try {
+      await ensureIndex();
+      const groups = [];
+      for (const [gid, abbr] of groupAbbrIndex.entries()) {
+        groups.push({
+          group_id: gid,
+          abbreviation: abbr,
+          name: groupNameIndex.get(gid) || '',
+        });
+      }
+      groups.sort((a, b) => (a.abbreviation || '').localeCompare(b.abbreviation || ''));
+      res.setHeader('Cache-Control', 's-maxage=86400, stale-while-revalidate=86400');
+      res.status(200).json({ groups, fetched_at: new Date().toISOString() });
+    } catch (e) {
+      res.status(502).json({ error: `TCGCSV upstream failure: ${e.message || e}` });
+    }
+    return;
+  }
+
+  if (allRaw) {
+    // Whole-catalog dump used by the TCGPlayer-as-source catalog loader.
+    // Returns every TCGPlayer product as a lean record with price snapshot.
+    // ~3000–5000 products = ~1–2 MB JSON; well under serverless limits.
+    try {
+      await ensureIndex();
+      const ids = [...productIndex.keys()];
+      const products = await Promise.all(ids.map(async (id) => {
+        const info = productIndex.get(id);
+        if (!info) return null;
+        return productPayload(id, info);
+      }));
+      const filtered = products.filter(Boolean);
+      filtered.sort((a, b) => {
+        const ga = a.group_abbreviation || '', gb = b.group_abbreviation || '';
+        if (ga !== gb) return ga.localeCompare(gb);
+        return (a.number || '').localeCompare(b.number || '');
+      });
+      res.setHeader('Cache-Control', 's-maxage=86400, stale-while-revalidate=86400');
+      res.status(200).json({
+        count: filtered.length,
+        products: filtered,
+        fetched_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      res.status(502).json({ error: `TCGCSV upstream failure: ${e.message || e}` });
+    }
+    return;
+  }
+
+  res.status(400).json({ error: 'one of ?tcgId=N, ?number=X, ?groupAbbr=X, ?all=1, or ?groups=1 is required' });
 }
