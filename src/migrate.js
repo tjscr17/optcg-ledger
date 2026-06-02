@@ -10,7 +10,7 @@
 
 import { store, MODE } from './storage.js';
 import { loadCatalog, augmentWithErrata } from './catalog.js';
-import { whenResolutionsReady, getResolution, saveResolution, clearResolution } from './pricing.js';
+import { whenResolutionsReady, getResolution, saveResolution, clearResolution, clearAllResolutions } from './pricing.js';
 
 const CANONICAL_MIGRATION_KEY = 'optcg:canonical-migration:v1';
 const TABLES = ['entries', 'transactions', 'watchlist', 'card_resolutions'];
@@ -288,4 +288,34 @@ export const runTcgplayerMigration = async () => {
     if (orphans > 0) console.info('[tcgplayer-migration] orphans:', [...orphanIds]);
   }
   return rewrites;
+};
+
+// ============================================================================
+// One-time clear of every legacy card_resolutions row.
+//
+// After the TCGPlayer-source switch, the catalog card IS the TCGPlayer
+// product — its imageUrl, tcgplayerUrl, marketPrice all come from one
+// product. The resolution layer is no longer needed for display, but the
+// 4133 rows the user accumulated during the OPTCGAPI era can disagree with
+// the catalog: an old autoResolveCard heuristic pick might have saved SP
+// Gold's image while the catalog now links to SP Silver. The display layer
+// then mixed the two ("correct image, wrong TCGPlayer link"). The pricing
+// override path still exists in code for future use, but we wipe the
+// legacy data here so the catalog is authoritative end-to-end.
+//
+// Idempotent via `optcg:clear-resolutions:v1` localStorage flag.
+// ============================================================================
+const CLEAR_RESOLUTIONS_KEY = 'optcg:clear-resolutions:v1';
+
+export const runClearLegacyResolutions = async () => {
+  if (localStorage.getItem(CLEAR_RESOLUTIONS_KEY)) return null;
+  let result = null;
+  try {
+    result = await clearAllResolutions();
+    console.info(`[clear-resolutions] cleared ${result.localCleared} local + ${result.remoteDeleted} remote resolutions`);
+  } catch (e) {
+    console.warn('[clear-resolutions] failed', e);
+  }
+  try { localStorage.setItem(CLEAR_RESOLUTIONS_KEY, new Date().toISOString()); } catch {}
+  return result;
 };

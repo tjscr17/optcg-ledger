@@ -258,10 +258,12 @@ const tcgImageUrlFromId = (tcgId) =>
 
 export const getCachedImageForCard = (card) => {
   if (!card) return null;
-  const cid = card.canonicalId || card.id;
-  const resolution = getResolution(cid);
-  if (resolution?.image_url) return resolution.image_url;
-  // TCGPlayer-sourced cards have imageUrl baked in.
+  // Catalog card is authoritative — TCGPlayer-sourced cards have imageUrl
+  // baked in from the same product the tcgplayerUrl points to, so image and
+  // link stay consistent. The resolution layer's image_url is no longer
+  // consulted here (it could disagree with card.tcgplayerUrl when an old
+  // autoResolveCard heuristic pick targeted a different product, e.g. SP
+  // Gold's image with the catalog still linking to SP Silver).
   if (card.imageUrl) return card.imageUrl;
   const tcgId = effectiveTcgId(card);
   return tcgImageUrlFromId(tcgId);
@@ -629,6 +631,29 @@ export const clearResolution = (cardId) => {
   if (!cardId) return;
   const map = ensureResolutionMap();
   if (map.delete(cardId)) scheduleResolutionPersist();
+};
+
+// Wipe every saved resolution — in-memory Map, localStorage warm-start cache,
+// and (in shared mode) the Supabase `card_resolutions` rows for this vault.
+// Used by the one-time cleanup migration after switching the catalog source
+// to TCGPlayer; the resolution layer is no longer the source of truth for
+// image / link / price (the catalog card is), so legacy resolutions whose
+// snapshots point at different TCGPlayer products than the catalog (e.g. SP
+// Gold's image when the catalog links to SP Silver) cause display drift.
+export const clearAllResolutions = async () => {
+  // In-memory map.
+  const map = ensureResolutionMap();
+  const had = map.size;
+  map.clear();
+  // localStorage cache.
+  try { localStorage.removeItem(RESOLUTION_CACHE_KEY); } catch {}
+  // Supabase rows in shared mode.
+  let remoteDeleted = 0;
+  if (MODE === 'shared') {
+    try { remoteDeleted = await store.deleteAllResolutions(); }
+    catch (e) { console.warn('[resolutions] remote delete failed', e); }
+  }
+  return { localCleared: had, remoteDeleted };
 };
 
 // Pull every shared-mode resolution row into the local cache. Run once on

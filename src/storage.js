@@ -61,6 +61,7 @@ const solo = {
   // Card resolutions: no remote in solo mode — caller relies on localStorage caches.
   async listResolutions() { return []; },
   async upsertResolution() { /* no-op */ },
+  async deleteAllResolutions() { return 0; },
   subscribeResolutions() { return () => {}; },
 };
 
@@ -263,6 +264,14 @@ const shared = {
       );
     if (error) console.error('upsertResolution failed', error);
     return !error;
+  },
+  async deleteAllResolutions() {
+    const { error, count } = await supa
+      .from('card_resolutions')
+      .delete({ count: 'exact' })
+      .eq('vault_key', VAULT_KEY);
+    if (error) { console.error('deleteAllResolutions failed', error); return 0; }
+    return count || 0;
   },
   subscribeResolutions(callback) {
     const channel = supa

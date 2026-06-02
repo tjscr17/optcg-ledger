@@ -3,7 +3,7 @@ import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, 
 import { store, MODE, VAULT_LABEL } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
-import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration } from './migrate.js';
+import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
   getResolution, clearResolution,
@@ -97,18 +97,13 @@ const useEnhancedImage = (card) => {
     const fallback = card.imageUrl || getCachedImageForCard(card);
     if (fallback && fallback !== url) setUrl(fallback);
     if (!inView) return;
-    const cid = card.canonicalId || card.id;
-    if (getTcgId(cid, card.id)) {
-      // Already resolved — just keep the price snapshot warm.
-      ensurePriceForCard(card);
-    } else {
-      // No tcg_id yet. Run the smart resolver: searches TCGCSV by card
-      // number, scores by set + parallel match, persists the pick. Fire-
-      // and-forget; the saveResolution emit triggers downstream re-renders.
-      autoResolveCard(card).then(picked => {
-        if (picked) ensurePriceForCard(card);
-      });
-    }
+    // TCGPlayer-sourced cards already know their tcg_id at catalog-build
+    // time — just keep the price snapshot warm. We no longer call
+    // autoResolveCard on viewport entry: the heuristic search-and-save
+    // was the cause of "image of SP Gold but link to SP Silver"-style
+    // drift, where the heuristic picked a different TCGPlayer product
+    // than the one the catalog assigned to this canonical id.
+    ensurePriceForCard(card);
   }, [card, inView, url]);
 
   return [ref, url];
@@ -219,6 +214,11 @@ export default function App() {
         // (OP14-118-p1) to the TCGPlayer-source form (OP14-118-parallel).
         // Bridges via tcg_id from resolutions; falls back to displayId match.
         await runTcgplayerMigration();
+        // After the switch the catalog card is authoritative for image/link
+        // — wipe legacy resolutions whose snapshots may disagree with the
+        // catalog (e.g. autoResolveCard's heuristic saved SP Gold's image
+        // when the catalog assigned SP Silver to the canonical id).
+        await runClearLegacyResolutions();
         await refreshData();
       } finally { setLoading(false); }
     })();
