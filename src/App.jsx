@@ -14,6 +14,24 @@ import {
   diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
   onMatchReportChanged,
 } from './pricing.js';
+import {
+  getPrintingAttributes, detectPrintingAttributes, printingAttribute,
+  listUserVariants, addUserVariant, updateUserVariant, removeUserVariant,
+  onPrintingAttributesChanged,
+} from './printing-attributes.js';
+
+// Effective attribute keys for a card / product / resolution snapshot,
+// falling back to derived booleans on legacy objects that pre-date the
+// attribute-list refactor.
+const attrsOf = (obj) => {
+  if (!obj) return [];
+  if (Array.isArray(obj.attributes)) return obj.attributes;
+  const fallback = [];
+  if (obj.isParallel || obj.is_parallel) fallback.push('parallel');
+  if (obj.isManga || obj.is_manga) fallback.push('manga');
+  return fallback;
+};
+const attrLabel = (key) => printingAttribute(key)?.label || key;
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
 // optional escape hatches for non-JSON-friendly values (e.g. Sets).
@@ -2137,7 +2155,7 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                           >
                             <span className="op-entry-id">{c.displayId || c.id}</span>
                             {' · '}{c.setId}
-                            {c.variant ? ` · ${c.variant}` : (c.isParallel ? ' · Parallel' : '')}
+                            {c.variant ? ` · ${c.variant}` : attrsOf(c).map(k => ` · ${attrLabel(k)}`).join('')}
                             {' · '}{RARITY_LABELS[c.rarity] || c.rarity}
                           </button>
                         ))}
@@ -3068,9 +3086,149 @@ function TransactionRow({ tx, collection, onDelete }) {
 }
 
 // ============================================================================
+// VariantsModal: edit the printing-attribute registry from the UI. Builtins
+// (parallel, manga) show locked; user-added variants can be removed. Adding
+// a variant immediately re-derives matching/diagnostics; the cached catalog
+// re-detects attributes on the next page load (the cache key includes a
+// fingerprint of the ruleset).
+function VariantsModal({ onClose }) {
+  const [defs, setDefs] = useState(() => getPrintingAttributes());
+  const [label, setLabel] = useState('');
+  const [keyInput, setKeyInput] = useState('');
+  const [mode, setMode] = useState('text');
+  const [value, setValue] = useState('');
+  const [error, setError] = useState('');
+
+  const refresh = () => setDefs(getPrintingAttributes());
+
+  const handleAdd = () => {
+    setError('');
+    const result = addUserVariant({
+      key: (keyInput || label).trim(),
+      label: label.trim(),
+      mode,
+      value: value.trim(),
+    });
+    if (!result.ok) { setError(result.error); return; }
+    setLabel(''); setKeyInput(''); setValue('');
+    refresh();
+  };
+
+  const handleRemove = (key) => {
+    if (!confirm(`Remove the "${key}" variant?`)) return;
+    removeUserVariant(key);
+    refresh();
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Printing variants</div>
+            <div className="op-modal-title">Manage variants</div>
+            <div className="op-modal-sub">
+              Each variant is detected from card names. Refresh the page after
+              changes to re-derive the catalog with the new rules.
+            </div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          <div className="op-form-section">
+            <div className="op-form-section-head">
+              <div>
+                <div className="op-form-section-title">Current variants</div>
+                <div className="op-form-section-sub">{defs.length.toLocaleString()} active</div>
+              </div>
+            </div>
+            <div className="op-tx-list">
+              {defs.map(d => (
+                <div key={d.key} className="op-tx-row">
+                  <div className="op-tx-type">{d.label.toUpperCase()}</div>
+                  <div className="op-tx-main">
+                    <div className="op-tx-card">
+                      <code style={{ fontSize: 12 }}>{d.mode === 'regex' ? '/' : '"'}{d.value}{d.mode === 'regex' ? '/i' : '"'}</code>
+                    </div>
+                    <div className="op-tx-meta">
+                      key: <code>{d.key}</code> · mode: {d.mode}
+                      {d.builtin ? ' · built-in' : ''}
+                    </div>
+                  </div>
+                  {!d.builtin && (
+                    <button className="op-tx-delete" onClick={() => handleRemove(d.key)} title="Remove this variant">
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="op-form-section">
+            <div className="op-form-section-head">
+              <div>
+                <div className="op-form-section-title">Add variant</div>
+                <div className="op-form-section-sub">
+                  Detection runs on TCGPlayer product names and OPTCGAPI card names.
+                </div>
+              </div>
+            </div>
+            <div className="op-form-row">
+              <Field label="Label">
+                <input
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                  placeholder="e.g. Event Stamp"
+                />
+              </Field>
+              <Field label="Key (auto from label)">
+                <input
+                  value={keyInput}
+                  onChange={(e) => setKeyInput(e.target.value)}
+                  placeholder={label ? label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : 'event-stamp'}
+                />
+              </Field>
+            </div>
+            <div className="op-form-row">
+              <Field label="Pattern mode">
+                <select value={mode} onChange={(e) => setMode(e.target.value)}>
+                  <option value="text">Plain text (literal match)</option>
+                  <option value="regex">Regex</option>
+                </select>
+              </Field>
+              <Field label="Pattern">
+                <input
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  placeholder={mode === 'text' ? 'e.g. Event Stamp' : 'e.g. \\(Event Stamp\\)|\\(Stamped\\)'}
+                />
+              </Field>
+            </div>
+            {error && <div className="op-graded-error">{error}</div>}
+            <div className="op-form-actions">
+              <button className="op-btn-ghost" onClick={onClose}>Close</button>
+              <button
+                className="op-btn-primary"
+                onClick={handleAdd}
+                disabled={!label.trim() || !value.trim()}
+              >
+                Add variant
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const [filterMode, setFilterMode] = useState('unresolved'); // 'unresolved' | 'in-collection' | 'issues' | 'reported' | 'all'
   const [search, setSearch] = useState('');
+  const [showVariants, setShowVariants] = useState(false);
   // In these queues, resolving a card makes it no longer qualify, so it
   // drops out and the next card slides into the current index. We must NOT
   // advance the index after a save in these modes, or we'd skip a card.
@@ -3103,6 +3261,12 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   // (e.g., the detail drawer overlaid on this view). Without this the Reported
   // queue stays stale until the user touches a local control.
   useEffect(() => onMatchReportChanged(() => setResolveRev(r => r + 1)), []);
+
+  // Same idea for printing-attribute edits — adding/removing a variant
+  // changes diagnose results, so the Issues queue and per-card display
+  // should refresh immediately even though the cached card.attributes
+  // won't fully re-derive until the next page reload.
+  useEffect(() => onPrintingAttributesChanged(() => setResolveRev(r => r + 1)), []);
 
   const cidOf = (c) => c.canonicalId || c.id;
   const isResolved = (c) => Boolean(getResolution(cidOf(c)));
@@ -3168,7 +3332,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     if (prefetching) return;
     const targets = catalog.filter(c => !isResolved(c));
     if (targets.length === 0) { alert('Everything is already resolved.'); return; }
-    if (!confirm(`Auto-resolve ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} via TCGCSV? Picks the TCGPlayer printing whose set matches the card's source set AND whose parallel flag matches. You can override any choice manually afterwards.`)) return;
+    if (!confirm(`Auto-resolve ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} via TCGCSV? Picks the TCGPlayer printing whose set matches the card's source set AND whose printing variants (parallel, manga, custom) line up. You can override any choice manually afterwards.`)) return;
     abortRef.current = false;
     setPrefetching(true);
     setPrefetchTotal(targets.length);
@@ -3371,7 +3535,16 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
             </button>
           )}
         </div>
+
+        <div className="op-filter-group">
+          <div className="op-filter-label">Variants</div>
+          <button className="op-btn-ghost" onClick={() => setShowVariants(true)} title="Add or edit printing variants (parallel, manga, custom...)">
+            Manage variants
+          </button>
+        </div>
       </div>
+
+      {showVariants && <VariantsModal onClose={() => setShowVariants(false)} />}
 
       {prefetching && (
         <div className="op-prefetch">
@@ -3433,7 +3606,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                 </div>
                 <div className="op-resolve-side-sub">
                   {RARITY_LABELS[currentCard.rarity] || currentCard.rarity}
-                  {currentCard.isParallel && ' · Parallel'}
+                  {attrsOf(currentCard).map(k => ` · ${attrLabel(k)}`).join('')}
                 </div>
                 <div className="op-resolve-side-sub">
                   Raw: ${effectiveRawPrice(currentCard).toFixed(2)}
@@ -3453,7 +3626,9 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                   <>
                     <div className="op-resolve-side-name">
                       {selected.name}
-                      {selected.is_parallel && <span className="op-variant-pill">Parallel</span>}
+                      {attrsOf(selected).map(k => (
+                        <span key={k} className="op-variant-pill">{attrLabel(k)}</span>
+                      ))}
                     </div>
                     <div className="op-resolve-side-sub">
                       {selected.group_abbreviation || '?'}{selected.group_name ? ` · ${selected.group_name}` : ''}
@@ -3491,7 +3666,11 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                   const isPicked = String(v.tcg_id) === selectedPickId;
                   const setMatch = v.group_abbreviation &&
                     v.group_abbreviation.replace(/-/g, '').toUpperCase() === (currentCard.setId || '').replace(/-/g, '').toUpperCase();
-                  const parallelMatch = Boolean(v.is_parallel) === Boolean(currentCard.isParallel);
+                  const cardAttrs = new Set(attrsOf(currentCard));
+                  const prodAttrs = new Set(attrsOf(v));
+                  // Render one tag per attribute key present on EITHER side,
+                  // color-coded by whether catalog and product agree.
+                  const relevantKeys = [...new Set([...cardAttrs, ...prodAttrs])];
                   return (
                     <button
                       key={v.tcg_id}
@@ -3504,9 +3683,17 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                         <span className={`op-resolve-candidate-tag ${setMatch ? 'is-ok' : 'is-warn'}`}>
                           {v.group_abbreviation || '?'}{v.group_name ? ` — ${v.group_name}` : ''}
                         </span>
-                        <span className={`op-resolve-candidate-tag ${parallelMatch ? 'is-ok' : 'is-warn'}`}>
-                          {v.is_parallel ? 'Parallel' : 'Base'}
-                        </span>
+                        {relevantKeys.length === 0 ? (
+                          <span className="op-resolve-candidate-tag is-ok">Base</span>
+                        ) : relevantKeys.map(k => {
+                          const ok = cardAttrs.has(k) === prodAttrs.has(k);
+                          const label = prodAttrs.has(k) ? attrLabel(k) : `Not ${attrLabel(k).toLowerCase()}`;
+                          return (
+                            <span key={k} className={`op-resolve-candidate-tag ${ok ? 'is-ok' : 'is-warn'}`}>
+                              {label}
+                            </span>
+                          );
+                        })}
                         <span className="op-resolve-candidate-tag">
                           {v.rarity || '?'}
                           {v.sub_type_name && v.sub_type_name !== 'Normal' ? ` · ${v.sub_type_name}` : ''}
@@ -3546,14 +3733,20 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                        : '—'}
                     </strong>
                   </div>
-                  <div className="op-resolve-diag-row">
-                    <span>Parallel match</span>
-                    <strong className={!currentDiagnostic.parallelMatch ? 'is-warn' : ''}>
-                      {currentDiagnostic.parallelMatch
-                        ? (currentCard.isParallel ? '✓ both parallel' : '✓ both base')
-                        : `✗ catalog ${currentCard.isParallel ? 'parallel' : 'base'} vs pick ${currentResolution?.is_parallel ? 'parallel' : 'base'}`}
-                    </strong>
-                  </div>
+                  {(currentDiagnostic.attributeMatches || []).map(m => {
+                    const cardHas = attrsOf(currentCard).includes(m.key);
+                    const pickHas = attrsOf(currentResolution).includes(m.key);
+                    return (
+                      <div key={m.key} className="op-resolve-diag-row">
+                        <span>{m.label} match</span>
+                        <strong className={!m.ok ? 'is-warn' : ''}>
+                          {m.ok
+                            ? (cardHas ? `✓ both ${m.label.toLowerCase()}` : `✓ neither ${m.label.toLowerCase()}`)
+                            : `✗ catalog ${cardHas ? 'is' : 'is not'} ${m.label.toLowerCase()} · pick ${pickHas ? 'is' : 'is not'}`}
+                        </strong>
+                      </div>
+                    );
+                  })}
                   <div className="op-resolve-diag-row">
                     <span>Market price</span>
                     <strong className={!currentDiagnostic.hasPrice ? 'is-warn' : ''}>
@@ -3642,7 +3835,9 @@ function CardTile({ card, onAddCard, onCardClick, onToggleWatch = () => {}, isWa
         <div className="op-card-tile-art">
           <CardArt card={card} />
           <div className="op-card-tile-rarity">{card.rarity}</div>
-          {card.isParallel && <div className="op-card-tile-parallel">PARALLEL</div>}
+          {attrsOf(card).map(k => (
+            <div key={k} className="op-card-tile-parallel">{attrLabel(k).toUpperCase()}</div>
+          ))}
         </div>
         <div className="op-card-tile-body">
           <div className="op-card-tile-id">{card.displayId || card.id}</div>
@@ -4052,12 +4247,13 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
                 <strong>{resolution.name || '(unnamed)'}</strong>
               </div>
               <div className="op-resolve-diag-row">
-                <span>Set · parallel</span>
-                <strong className={(!diagnostic.parallelMatch || diagnostic.setMatch === false) ? 'is-warn' : ''}>
+                <span>Set · variant</span>
+                <strong className={diagnostic.issues.length > 0 ? 'is-warn' : ''}>
                   {resolution.group_abbreviation || '?'}
                   {resolution.group_name ? ` · ${resolution.group_name}` : ''}
-                  {' · '}
-                  {resolution.is_parallel ? 'Parallel' : 'Base'}
+                  {attrsOf(resolution).length > 0
+                    ? attrsOf(resolution).map(k => ` · ${attrLabel(k)}`).join('')
+                    : ' · Base'}
                 </strong>
               </div>
               {resolution.tcgplayer_url && (

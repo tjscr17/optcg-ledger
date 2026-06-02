@@ -15,6 +15,7 @@
 // ============================================================================
 
 import { store, MODE } from './storage.js';
+import { getPrintingAttributes, detectPrintingAttributes } from './printing-attributes.js';
 
 const PRICE_CACHE_KEY = 'optcg:tcgcsv:prices:v1';
 const PRICE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — TCGCSV refreshes daily, this is generous
@@ -289,30 +290,54 @@ export const searchTcgProducts = async (displayId) => {
     const r = await fetch(`/api/tcgcsv?number=${encodeURIComponent(number)}`);
     if (!r.ok) return [];
     const body = await r.json();
-    return Array.isArray(body?.products) ? body.products : [];
+    const products = Array.isArray(body?.products) ? body.products : [];
+    // Re-derive attributes client-side so user-defined variants take effect
+    // even though the server's prebuilt is_parallel / is_manga hints don't
+    // know about them. The proxy's hints become decorative.
+    return products.map(p => ({ ...p, attributes: detectPrintingAttributes(p.name) }));
   } catch (e) {
     console.warn('[tcgcsv] product search failed for', number, e);
     return [];
   }
 };
 
-// Pick the TCGPlayer product that best matches a given catalog card. Score
-// weights, descending:
-//   +100  group_abbreviation (TCGPlayer set) matches the card's source set
-//          (card.setId normalized — "OP-11" → "OP11")
-//   + 60  is_parallel matches the card's isParallel flag
+// True if the card has the given attribute. Falls back to derived booleans
+// for legacy card objects (pre-attributes-refactor) that lack the array.
+const cardHasAttr = (card, key) => {
+  if (Array.isArray(card?.attributes)) return card.attributes.includes(key);
+  if (key === 'parallel') return Boolean(card?.isParallel);
+  if (key === 'manga') return Boolean(card?.isManga);
+  return false;
+};
+
+// True if a product has the attribute. Products always carry `attributes`
+// after searchTcgProducts decoration; fall back to the legacy is_* fields
+// for cached resolution snapshots saved before the refactor.
+const productHasAttr = (product, key) => {
+  if (Array.isArray(product?.attributes)) return product.attributes.includes(key);
+  if (key === 'parallel') return Boolean(product?.is_parallel);
+  if (key === 'manga') return Boolean(product?.is_manga);
+  return false;
+};
+
+// Pick the TCGPlayer product that best matches a given catalog card. Scoring
+// is generic across the printing-attribute registry — every attribute key
+// (parallel, manga, plus any user-defined) contributes +60 when card and
+// product agree on it. Other weights:
+//   +100  group_abbreviation matches the card's source set
 //   + 10  has a market price (prefer products with actual pricing data)
-// Ties broken by market_price desc (the live/expensive printing is usually
-// the more recently listed one). Returns null if products is empty.
+// Ties broken by market_price desc. Returns null if products is empty.
 export const pickBestMatchForCard = (card, products) => {
   if (!card || !Array.isArray(products) || products.length === 0) return null;
   const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
-  const wantsParallel = Boolean(card.isParallel);
+  const attrDefs = getPrintingAttributes();
   const scored = products.map(p => {
     let score = 0;
     const abbrNorm = (p.group_abbreviation || '').replace(/-/g, '').toUpperCase();
     if (cardSetNorm && abbrNorm && abbrNorm === cardSetNorm) score += 100;
-    if (Boolean(p.is_parallel) === wantsParallel) score += 60;
+    for (const def of attrDefs) {
+      if (cardHasAttr(card, def.key) === productHasAttr(p, def.key)) score += 60;
+    }
     if (p.market_price != null && p.market_price > 0) score += 10;
     return { product: p, score, price: Number(p.market_price) || 0 };
   });
@@ -321,21 +346,21 @@ export const pickBestMatchForCard = (card, products) => {
 };
 
 // Returns a TCGPlayer product ONLY when the match is unambiguous — i.e.
-// exactly one candidate matches both the card's source set and its parallel
-// flag (or there's literally one product for the number). Returns null when
-// the choice is ambiguous (multiple set+parallel matches, or none) so the
-// caller knows to stop and ask the user. This is the bar for "auto-resolve
-// without confirmation."
+// exactly one candidate agrees with the card on the source set AND every
+// printing attribute in the registry. Returns null when ambiguous so the
+// caller knows to stop and ask the user. This is the bar for auto-resolve.
 export const confidentMatchForCard = (card, products) => {
   if (!card || !Array.isArray(products) || products.length === 0) return null;
   if (products.length === 1) return products[0];
   const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
-  const wantsParallel = Boolean(card.isParallel);
+  const attrDefs = getPrintingAttributes();
   const exact = products.filter(p => {
     const abbrNorm = (p.group_abbreviation || '').replace(/-/g, '').toUpperCase();
-    const setMatch = cardSetNorm && abbrNorm && abbrNorm === cardSetNorm;
-    const parallelMatch = Boolean(p.is_parallel) === wantsParallel;
-    return setMatch && parallelMatch;
+    if (!cardSetNorm || !abbrNorm || abbrNorm !== cardSetNorm) return false;
+    for (const def of attrDefs) {
+      if (cardHasAttr(card, def.key) !== productHasAttr(p, def.key)) return false;
+    }
+    return true;
   });
   return exact.length === 1 ? exact[0] : null;
 };
@@ -384,9 +409,15 @@ export const saveResolution = (cardId, productSummary, { confirmed = false } = {
     tcgplayer_url: productSummary.tcgplayer_url || '',
     rarity: productSummary.rarity || '',
     is_parallel: Boolean(productSummary.is_parallel),
+    // Generic attributes — derived from the product name via the printing-
+    // attribute registry. Stored on the snapshot so diagnose calls don't need
+    // to re-derive on every read.
+    attributes: Array.isArray(productSummary.attributes)
+      ? [...productSummary.attributes]
+      : detectPrintingAttributes(productSummary.name),
     // Set when a human explicitly picked this printing (manual Save in the
     // resolver). Confirmed picks are exempt from the Issues queue — the
-    // set/parallel flag check is a heuristic, and the user is the authority.
+    // attribute checks are heuristics, and the user is the authority.
     confirmed: Boolean(confirmed),
     saved_at: Date.now(),
   };
@@ -523,12 +554,16 @@ export const clearMatchReport = (cardId) => {
   }
 };
 
-// Diagnose a resolution: does the picked product's set match the card's
-// source set? Does the parallel flag match? Returns an object the Resolve
-// view uses to surface issues. Pure read.
+// Diagnose a resolution: does the picked product agree with the catalog card
+// on the source set and on every printing attribute? Returns an object the
+// Resolve view uses to surface issues. Pure read.
+//
+// `attributeMatches` is a generic `{key, label, ok}[]` array driven by the
+// printing-attribute registry, so the Resolve UI can render per-attribute
+// match rows without knowing which attributes exist.
 export const diagnoseResolution = (card, resolution) => {
   if (!card || !resolution || !resolution.tcg_id) {
-    return { resolved: false, issues: [], setMatch: null, parallelMatch: null };
+    return { resolved: false, issues: [], setMatch: null, attributeMatches: [] };
   }
   const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
   const productSetNorm = (resolution.group_abbreviation || '')
@@ -537,17 +572,30 @@ export const diagnoseResolution = (card, resolution) => {
   const setMatch = cardSetNorm && productSetNorm
     ? cardSetNorm === productSetNorm
     : null; // null = can't compare (one side missing)
-  const parallelMatch = Boolean(resolution.is_parallel) === Boolean(card.isParallel);
+
+  // For each registered attribute, do card and product agree?
+  // Resolution snapshots saved before the refactor lack `attributes`, so
+  // re-derive from the saved name if needed to keep diagnosis consistent.
+  const resolutionView = Array.isArray(resolution.attributes)
+    ? resolution
+    : { ...resolution, attributes: detectPrintingAttributes(resolution.name) };
+  const attributeMatches = getPrintingAttributes().map(def => ({
+    key: def.key,
+    label: def.label,
+    ok: cardHasAttr(card, def.key) === productHasAttr(resolutionView, def.key),
+  }));
+
   const issues = [];
   if (setMatch === false) issues.push('set');
-  if (!parallelMatch) issues.push('parallel');
+  for (const m of attributeMatches) if (!m.ok) issues.push(m.key);
+
   // A missing price is a TCGCSV data gap (no recent sales, or just not fetched
-  // yet), NOT a bad match — so it is reported via `hasPrice` for display but
-  // deliberately does NOT count as an issue. Otherwise a correctly-matched
-  // card with no price would be stuck in the Issues queue forever.
+  // yet), NOT a bad match — surfaced via `hasPrice` for display but does NOT
+  // count as an issue. Otherwise a correctly-matched card with no price
+  // would be stuck in the Issues queue forever.
   const snap = getCachedSnapshot(resolution.tcg_id);
   const hasPrice = snap && Number(snap.market_price) > 0;
-  return { resolved: true, issues, setMatch, parallelMatch, hasPrice };
+  return { resolved: true, issues, setMatch, attributeMatches, hasPrice };
 };
 
 // Forget a resolution (lets the user redo the picker). Only touches the

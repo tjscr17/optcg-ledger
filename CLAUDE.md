@@ -119,6 +119,36 @@ localStorage, so cards look unresolved and trigger redundant TCGCSV searches.
 and `saveResolution(cardId, product)`. The `onPriceResolved` emitter
 drives UI re-renders when async price fetches land.
 
+### Printing-attribute registry
+
+Every printing facet (parallel, manga, plus any user-defined variant like
+event stamps) is declared in [src/printing-attributes.js](src/printing-attributes.js)
+as `{ key, label, mode: 'text'|'regex', value }`. Detection, match scoring,
+issue diagnosis, and UI pills all iterate this list — adding a new facet is
+a single entry, no other code edits.
+
+- Builtins (`parallel`, `manga`) ship hardcoded; user-added entries persist
+  to `localStorage` (`optcg:variants:v1`) and are managed from the **Manage
+  variants** modal in the Resolve view.
+- `detectPrintingAttributes(name)` matches against OPTCGAPI `card_name` AND
+  TCGPlayer product `name` (same regex applied both sides). Each catalog
+  card carries `card.attributes: string[]`; each product gets `attributes`
+  decorated client-side in `searchTcgProducts` so user-defined patterns apply
+  even though the proxy doesn't know about them.
+- `pickBestMatchForCard` / `confidentMatchForCard` loop the registry: +60 per
+  attribute the card and product agree on; confidence requires every
+  registered attribute to agree.
+- `diagnoseResolution` returns `attributeMatches: {key, label, ok}[]` driven
+  by the registry, so the diagnostic panel renders one row per attribute
+  without naming any.
+- The catalog cache key is `optcg:catalog:v10:<fingerprint>` where
+  `printingAttributesFingerprint()` is a stable hash of the active ruleset —
+  editing variants invalidates the cache so the next load re-derives every
+  card's attributes.
+- Derived `isParallel` / `isManga` booleans are still kept on catalog cards
+  for back-compat with older consumer code; new consumers should prefer
+  `card.attributes`.
+
 ---
 
 ## Schema (actual, shared mode)

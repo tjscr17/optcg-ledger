@@ -12,10 +12,15 @@
 // For price history we hit /api/sets/card/twoweeks/{id}/ on demand per card.
 // ============================================================================
 
+import { detectPrintingAttributes, printingAttributesFingerprint } from './printing-attributes.js';
+
 const API = 'https://optcgapi.com/api';
-// v8 bumps the cache key after adding canonicalId to each card object —
-// older cached entries don't have it and would break canonical-id lookups.
-const CACHE_KEY = 'optcg:catalog:v8';
+// v10 introduces the generic `attributes` list (parallel/manga/user-defined)
+// in place of per-attribute booleans. The cache key now also includes a
+// fingerprint of the user's effective variant rules — when the user edits
+// variants the catalog re-derives attributes on next load.
+const CACHE_KEY_BASE = 'optcg:catalog:v10';
+const cacheKey = () => `${CACHE_KEY_BASE}:${printingAttributesFingerprint()}`;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const HISTORY_PREFIX = 'optcg:history:';
 const HISTORY_TTL_MS = 6 * 60 * 60 * 1000; // 6h
@@ -131,9 +136,19 @@ const normalize = (raw, sourceType) => {
     inventoryPrice: Number(raw.inventory_price) || 0,
     imageUrl: raw.card_image,
     imageId: raw.card_image_id || id,
-    isParallel: /\(Parallel\)|\(Alternate\)|_p\d/i.test(raw.card_name || '') || /_p\d/i.test(raw.card_image_id || ''),
     source: sourceType,
   };
+  // Generic attribute set: every printing facet (parallel, manga, plus any
+  // user-defined variant) detected from the card name. `_p\d` image-id
+  // suffix is an additional parallel signal that doesn't always appear in
+  // the name, so we add 'parallel' explicitly when the image suggests it.
+  const attrs = new Set(detectPrintingAttributes(raw.card_name));
+  if (/_p\d/i.test(raw.card_image_id || '')) attrs.add('parallel');
+  card.attributes = [...attrs];
+  // Derived booleans kept for code that already reads them. New consumers
+  // should prefer card.attributes for genericity.
+  card.isParallel = attrs.has('parallel');
+  card.isManga = attrs.has('manga');
   card.canonicalId = canonicalIdOf(card);
   return card;
 };
@@ -143,7 +158,7 @@ let catalogPromise = null;
 // Read whatever's in the cache, regardless of age. Returns null on miss.
 const readCachedCatalog = () => {
   try {
-    const raw = localStorage.getItem(CACHE_KEY);
+    const raw = localStorage.getItem(cacheKey());
     if (!raw) return null;
     const { ts, cards } = JSON.parse(raw);
     if (Array.isArray(cards) && cards.length > 0) return { cards, age: Date.now() - ts };
@@ -207,7 +222,7 @@ const revalidateCatalog = async () => {
     });
 
     try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cards: final }));
+      localStorage.setItem(cacheKey(), JSON.stringify({ ts: Date.now(), cards: final }));
     } catch {
       // localStorage might be full — strip down to essentials
       const slim = final.map(c => ({
@@ -217,9 +232,9 @@ const revalidateCatalog = async () => {
         rarity: c.rarity, type: c.type, color: c.color, cost: c.cost, power: c.power,
         life: c.life, counter: c.counter, attribute: c.attribute, subTypes: c.subTypes,
         marketPrice: c.marketPrice, inventoryPrice: c.inventoryPrice,
-        imageUrl: c.imageUrl, imageId: c.imageId, isParallel: c.isParallel, source: c.source,
+        imageUrl: c.imageUrl, imageId: c.imageId, attributes: c.attributes, isParallel: c.isParallel, isManga: c.isManga, source: c.source,
       }));
-      try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cards: slim })); } catch {}
+      try { localStorage.setItem(cacheKey(), JSON.stringify({ ts: Date.now(), cards: slim })); } catch {}
     }
 
     return final;

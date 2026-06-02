@@ -65,6 +65,13 @@ const detectIsParallel = (name) => {
   return /\(alternate art\)|\(parallel\)|\(alt[- ]art\)|\(special\)|\(sp\)/i.test(lower);
 };
 
+// Manga rares are a sub-distinction within alt printings. TCGPlayer labels
+// them with `(Manga Rare)` or `(Manga)` in the product name.
+const detectIsManga = (name) => {
+  if (!name) return false;
+  return /\(manga rare\)|\(manga\)/i.test(name);
+};
+
 const summarizeProduct = (p, groupId) => ({
   groupId,
   name: p.name || '',
@@ -74,6 +81,7 @@ const summarizeProduct = (p, groupId) => ({
   number: extField(p.extendedData, 'Number'),
   rarity: extField(p.extendedData, 'Rarity'),
   isParallel: detectIsParallel(p.name),
+  isManga: detectIsManga(p.name),
 });
 
 const ensureIndex = async () => {
@@ -156,6 +164,7 @@ const productPayload = async (tcgId, info) => {
     number: info.number,
     rarity: info.rarity,
     is_parallel: info.isParallel,
+    is_manga: info.isManga,
     market_price: record?.marketPrice ?? null,
     low_price: record?.lowPrice ?? null,
     mid_price: record?.midPrice ?? null,
