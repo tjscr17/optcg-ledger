@@ -15,47 +15,49 @@ Status conventions:
 
 | Capability | Status | Notes |
 |---|---|---|
-| Card catalog (OPTCGAPI) | ✅ | 4 endpoints, 24h localStorage cache, stale-while-revalidate, slim fallback when quota hits |
-| Set/rarity/color/sort filters in Search | ✅ | Plus "Hide by" multi-dim and a "Price as" tier toggle |
+| Card catalog (TCGPlayer-sourced via TCGCSV) | ✅ | ~5000 products incl. release-event / tournament sets OPTCGAPI didn't ship. Iterates `?groups=1` + `?groupAbbr=X` per group; 24h localStorage cache keyed by `optcg:catalog:v11:<variant-fingerprint>`. OPTCGAPI fully removed 2026-06-01. |
+| Set / Rarity / Sort filters in Search | ✅ | Plus expand/collapse Hide-rarities row. Color / Type / Cost / Power filters dropped with the catalog-source switch (TCGPlayer has no game data). |
 | Collection-level cost basis & P&L | ✅ | Cost basis = `purchase_price + linked card-scoped expenses` |
 | Per-entry actions (edit, expense, sell, delete) | ✅ | Trash icon = silent delete (no tx); $ icon = sell flow with proceeds |
 | Sell flow with sale proceeds and contributions | ✅ | `SellModal` writes a `sell` tx and removes the entry |
-| Transactions ledger | ✅ | Buy / sell / transfer / expense rows, type & collection filters |
+| Transactions ledger | ✅ | Buy / sell / transfer / expense / payout rows, type & collection filters |
 | Delete transactions | ✅ | Trash icon on every tx row; equity recalculates live |
 | Transfers (cash between members) | ✅ | Sign convention: sender +, receiver − |
 | Pool expenses | ✅ | `ExpenseModal`, optionally card-scoped via `entry_id` |
+| Payouts (cash out to members) | ✅ | `PayoutModal` (2026-06-01); UI amounts are positive per recipient, EquityPanel treats `type:'payout'` like `sell` so the recipient's net contribution drops. |
 | Card-scoped expenses (grading, shipping) | ✅ | Roll into the entry's cost basis |
 | Bulk grading flow | ✅ | Multi-card select, per-card cost, payer splits scaled proportionally |
 | Capital-mode equity | ✅ | Net signed contributions, equity % from positive nets |
 | Time-weighted equity | ✅ | Fund-accounting units, two-direction NAV mark on buys/sells, transfer is zero-sum at current unit price |
-| TCGCSV variant resolution | ✅ | Per-card picker + auto-resolve-all bulk action in Resolve view; shared via `card_resolutions.tcg_id` + `snapshot` in shared mode |
-| Card image fallback | ✅ | OPTCGAPI image when available, else TCGPlayer CDN via the saved `tcg_id` |
-| PSA cert lookup → entry pre-fill | ✅ | Vercel function proxies CORS; multi-strategy catalog matcher |
+| Catalog tab (was Resolve) | ✅ | Browse 5000+ TCGPlayer printings; per-card view shows "Related printings" siblings; Reported queue for user-flagged cards. The override-resolution picker workflow was retired 2026-06-01. |
+| Printing-attribute registry + Variants manager | ✅ | Regex registry in `src/printing-attributes.js` (builtins: parallel, manga; user-added via the Variants manager modal). Drives detection, canonical id construction, UI pills. Cache key v11 includes the ruleset fingerprint. |
+| Per-card attribute overrides | ✅ | Manual classification add/remove from the card detail drawer. Localstorage `optcg:card-attribute-overrides:v1`. Effective attributes = `(detected − remove) ∪ add`. Canonical ids stay rooted in *detected* attributes for stability. |
+| Card image / TCGPlayer link consistency | ✅ | Catalog card is authoritative — `card.imageUrl` + `card.tcgplayerUrl` always come from the same TCGPlayer product. The resolution-layer image_url override was retired (fixed "SP Silver image / SP Gold link" drift). |
+| PSA cert lookup → entry pre-fill | ✅ | Vercel function proxies CORS; multi-strategy catalog matcher. `setNorm.startsWith` so PSA "OP14" hits OP14 + OP14 RE + OP14 ANN groups; `fullName` fallback for subjects mentioning alt-art / manga. |
 | PSA parallel/alt-art picker | ✅ | `findCandidateCards` returns all printings sharing a displayId |
 | Pre-errata twin support | ✅ | Per-card toggle; synthesizes a twin in the augmented catalog |
 | Watchlist | 🟡 | UI + storage exist; `last_seen_*` fields never populated (no scraper) |
 | Solo/shared mode toggle | ✅ | Driven by `VITE_SUPABASE_*` env vars; runtime indicator pill |
 | Supabase Realtime sync | ✅ | Per-table subscriptions update local state on remote writes |
-| Pop-up / silent insert failure surfacing | ✅ | `addEntry` / `onLogTransaction` alert when shared insert returns null |
-| Real auth (per-user) | ❌ | Replaced by `vault_key` shared-secret partitioning; permissive RLS |
+| Pop-up / silent insert failure surfacing | ✅ | `addEntry` / `onLogTransaction` alert when shared insert returns null. Alert now includes the Supabase error code/message/details/hint via `getLastStoreError()`. |
+| Real auth (per-user) | ❌ | Replaced by `vault_key` shared-secret partitioning; permissive RLS. Bug-reporter initiative would force this. |
 | Append-only ledger guarantees | ❌ | Transactions are user-deletable; no immutable `sales` / `price_history` |
-| Historical price snapshots in DB | ⬜ | Only OPTCGAPI's 14-day window, no local persistence |
+| Historical price snapshots in DB | ⬜ | OPTCGAPI's 14-day endpoint is gone (catalog source removed); no local persistence |
 | Live listings / underpriced alerts | ⬜ | Future Phase 3 |
 | Fair value model | ⬜ | Future Phase 4 |
 | Grade premium model | ⬜ | Graded prices are manual entry only (auto-fetch parked Stage 4); a pop-aware scarcity model needs eBay-sold data |
-| JP / EU coverage | ⬜ | OPTCGAPI is the only catalog |
+| JP / EU coverage | ⬜ | English-only catalog. JP / Korean spec work parked. |
 | Python anywhere | ❌ | Project is React + Vite + JS only; reversed from the original context doc |
-| TCGCSV integration | ✅ | Complete (2026-05-27): TCGCSV is the only price source. `/api/tcgcsv` proxy + `src/pricing.js` + variant resolver in Resolve view. PriceCharting fully removed (no client, no env var, no UI). Legacy DB columns can be dropped at your leisure via SQL in `src/storage.js`. |
-| Canonical card IDs | ✅ | `canonicalIdOf(card)` in catalog.js; one-time DB migration in src/migrate.js; all callers updated |
+| TCGCSV integration (catalog + prices) | ✅ | Complete (2026-06-01): TCGCSV is both the catalog source AND the price source. OPTCGAPI fully removed. |
+| Canonical card IDs (TCGPlayer-source form) | ✅ | `canonicalIdOf(card)` in catalog.js; attribute-tag suffix (`-parallel`, `-manga`, `-manga-parallel`); `runTcgplayerMigration` bridged the OPTCGAPI-era `_p\d` form via tcg_id on 2026-06-01. |
 | Playwright scrapers | ⬜ | Future Phase 3 |
 | Daily backups of price/sales history | ⬜ | Not configured |
 | Automated tests | ⬜ | None; smoke test is `npm run build` |
+| Remote bug-fix pipeline (in-site report → GH issue → Claude Code PR → preview → phone notify) | ⬜ | Spec in `directions/`; see initiative below |
 
 ---
 
 ## Phased roadmap
-
-Preserved from `CONVERSATION_CONTEXT.md`, annotated against current state.
 
 ### Phase 0 — Personal ledger (CURRENT)
 
@@ -71,25 +73,31 @@ marketplace ambitions land.
 - [ ] User decides whether to invest in real auth before scaling beyond
       the friend group
 
-### Phase 1 — Fix price data foundation 🟡
+### Phase 1 — Fix price data foundation ✅ (mostly)
 
 Per context doc: replace PriceCharting with TCGCSV, build the matcher
 pipeline + review queue.
 
-**Current state (2026-05-27, post-migration):**
-- ✅ TCGCSV is the sole price source. `/api/tcgcsv` proxies the daily
-  TCGPlayer dumps; `src/pricing.js` caches per-card snapshots.
-- ✅ Variant resolver in the Resolve view: per-card picker showing every
-  TCGPlayer printing for that card number, plus an "Auto-resolve all"
-  bulk action that picks the non-parallel base for each unresolved card.
-- ⬜ Confidence-bucketed admin review queue (auto / needs-review /
-  unmatched): not built. Today's resolver shows all unresolved cards
-  equally — the auto-resolve picks confidently but doesn't flag low-confidence
-  matches for review.
+**Current state (post-2026-06-01 catalog switch):**
+- ✅ TCGCSV is both the price source AND the catalog source. Every catalog
+  card carries `tcg_id`, `imageUrl`, `tcgplayerUrl`, and the current
+  market/low/mid/high snapshot. No per-card "resolve" step needed — the
+  catalog IS the mapping.
+- ✅ Matcher pipeline collapsed: the override picker was retired with the
+  TCGPlayer-source switch (catalog cards are TCGPlayer products, so there's
+  no ambiguity to resolve). Variant detection happens via the printing-
+  attribute registry; user-extensible via the Variants manager modal in
+  the Catalog tab.
+- ✅ User-extension path for misclassified cards: per-card attribute
+  overrides (drawer → Classifications). Handles "TCGPlayer's name doesn't
+  say manga but this card IS manga" cases.
+- ❌ Confidence-bucketed admin review queue: no longer applicable —
+  there's no auto-matching workflow to bucket. The Reported queue on the
+  Catalog tab is the user-driven analog.
 
 **Exit criteria** (per context doc): ≥95% of cards have a confirmed mapping
-and a current price. Achievable today via the "Auto-resolve all" button;
-needs a post-run audit to count the gaps and a separate UI to surface them.
+and a current price. **Effectively met by construction** since every catalog
+card is a TCGPlayer product with a tcg_id baked in.
 
 ### Phase 2 — Historical price capture ⬜
 
@@ -98,9 +106,8 @@ history charts.
 
 **Current state:**
 - ⬜ No `price_history` table in the Supabase schema (`src/storage.js`).
-- 🟡 OPTCGAPI's 14-day endpoint is hit on-demand from `loadPriceHistory` and
-  rendered in `PriceChart`; result is cached in localStorage 6h. No
-  durable history we own.
+- ❌ OPTCGAPI's 14-day endpoint is gone with the catalog-source switch.
+  The detail drawer's 14-day trend chart was removed.
 - ⬜ No daily snapshot job. No S3/B2 backup. Vercel doesn't run our scheduled
   jobs.
 
@@ -137,6 +144,60 @@ eBay sold data, or pull from a different graded source if one shows up.
 
 JP (Yuyu-tei, Cardrush, Snkrdunk), Cardmarket EU, Whatnot pricing, portfolio
 analytics. All ⬜.
+
+---
+
+## Cross-cutting initiative — Remote bug-fix pipeline ⬜
+
+Off the main pricing roadmap, but high-leverage: capture bugs from a phone
+while away from the dev machine, get a Vercel preview link with a proposed
+fix back as a push notification, approve on the phone. Spec lives in
+`directions/REMOTE_BUGFIX_PIPELINE.md` (integrated 2026-06-02). Four
+independently useful phases:
+
+1. **In-site bug reporter** (highest ROI). Floating "Report bug" button →
+   `bug_reports` Supabase row with description, severity, page URL,
+   viewport, console/network errors, optional screenshot. Phase 1 exit:
+   submitting from any page lands a full-context row.
+2. **Supabase → GitHub bridge.** Edge Function triggered on
+   `bug_reports` insert, formats the report into a GH issue with
+   `bug` / `reported-from-site` labels; auto-adds `auto-fix` for
+   low/medium severity. Stamps `github_issue_number` on the row.
+3. **Claude Code auto-fix.** GitHub Actions workflow listens for
+   `auto-fix` label, runs `anthropics/claude-code-action` with the
+   issue as the prompt, opens a branch + PR. Vercel deploys a preview
+   automatically.
+4. **Mobile notifications.** Discord (easiest) or Telegram webhook on
+   PR open → push notification with the preview link.
+
+**Schema (Phase 1):** `bug_reports (id uuid pk, reporter_id uuid →
+auth.users, created_at, description text, severity check (low|medium|high),
+page_url, user_agent, viewport_width/height, console_errors jsonb,
+network_errors jsonb, screenshot_url, app_state jsonb, status check (new|
+queued|in_progress|pr_opened|resolved|wont_fix), github_issue_number int,
+github_pr_number int, resolved_at)`. Needs `authorized_users` for RLS gating
+— current vault-key model doesn't have user identities, so the bug reporter
+forces the auth question (one of the existing "before Phase 2" architectural
+decisions).
+
+**Required secrets** (per phase): GitHub PAT (`issues:write`,
+`contents:write`), `ANTHROPIC_API_KEY` in GH Actions, Discord/Telegram
+webhook URL.
+
+**Open decisions** (from the spec, unresolved):
+- Severity routing: should `high` skip auto-fix until trust is built? Spec
+  defaults yes.
+- Auto-merge for trivial fixes? Spec says never — always human review.
+- Notification channel: Discord vs Telegram vs ntfy.sh / Pushover?
+- Screenshot storage: public Supabase bucket vs signed URLs.
+- What gets the `auto-fix` label automatically (all low/medium) vs manual
+  opt-in only?
+
+Estimated cost (per spec): under $10/mo at personal-use volume —
+Anthropic API at ~$0.10–$1.00 per auto-fix attempt is the dominant line item.
+
+Forcing function: this initiative wants real Supabase Auth, which is
+already one of the "before Phase 2" open decisions.
 
 ---
 
@@ -205,6 +266,17 @@ shown is the first commit introducing the change.
 | 2026-05-27 | `/api/optcg-history` proxy added: OPTCGAPI's `/twoweeks/` endpoints return 500 (without CORS headers) for any card with no recent history, surfacing as scary CORS errors in the browser console. The proxy runs the three OPTCGAPI history endpoints server-side and always responds 200 with a (possibly empty) `points` array. `loadPriceHistory` rerouted through the proxy. | The 500-on-no-history was the dominant remaining console-noise source post-Stage 5. Suppressing it fully required absorbing the response server-side; the catalog cache layer (incl. empty-result caching) still helps the warm path. | `api/optcg-history.js`, `vite.config.js`, `src/catalog.js` |
 | 2026-05-27 | `/api/tcgcsv` returns 200 + `{ not_found: true }` instead of 404 for unknown productIds or empty price records. The client treats both identically (negative-cache for 6h) but the browser console no longer logs 404s for stale resolutions carried over from the PriceCharting era. | Same family of noise-suppression fix. A 404 is technically correct HTTP, but every cert-modal-ish encounter with a retired TCGPlayer product becomes a console error otherwise. | `api/tcgcsv.js`, `vite.config.js`, `src/pricing.js` |
 | 2026-05-27 | TCGCSV migration Stage 5: PriceCharting fully removed. `src/grading.js` deleted; image fallback and shared-mode resolution sync moved into `src/pricing.js` (`getCachedImageForCard`, `hydrateResolutionsFromShared`, `subscribeToSharedResolutions`). `useEnhancedImage` rewritten to drop the PC fetch path. `effectiveRawPrice` no longer falls back to PC's `getCachedLoosePrice`. `runPcCleanup` in `src/migrate.js` promotes the legacy `optcg:pc:images:v1` tcg_id mappings into the new TCGCSV resolution cache before deleting all `optcg:pc:*` localStorage keys (idempotent via `optcg:pc-cleanup:v1` flag). `VITE_PRICECHARTING_TOKEN` removed from `.env.example`. README + CLAUDE.md + storage.js schema comments updated. Legacy `card_resolutions.pc_*` columns in Supabase stay until the user runs the drop-column SQL documented in `src/storage.js`. Bundle 464 KB (gzip 130 KB) — back to roughly pre-migration size despite the new TCGCSV plumbing. | Final stage of the PriceCharting → TCGCSV swap. End state: TCGCSV is the only price source; PC is gone from the bundle, env vars, and active code paths. | `src/App.jsx`, `src/pricing.js`, `src/migrate.js`, `src/storage.js`, `.env.example`, `README.md`, deleted `src/grading.js` |
+| 2026-05-28 | Resolutions held in an in-memory `resolutionMap` as the source of truth for reads, with localStorage as a debounced best-effort warm-start and Supabase as the durable shared-mode store. `listResolutions` paginates via `.range()` to beat PostgREST's 1000-row default cap. `whenResolutionsReady()` gate prevents the viewport-driven autoResolveCard from re-resolving already-saved cards on every refresh in shared mode. `effectiveTcgId` / `getMarketPriceForCard` / `getCachedImageForCard` / `ensurePriceForCard` route through the override layer cleanly. Surfaced silent shared-mode upsert failures via a one-time `[resolutions] Supabase upsert ... failed` console error. | Bulk auto-resolve reported "3602 saved" but the count stayed 3922 because the resolution cache was a single localStorage JSON blob that overflowed the ~5 MB quota — writes threw silently and reads pulled the partial cache. The Map fixes reads; Supabase fixes persistence; the pagination + ready-gate fix the refresh re-resolve loop. | `src/pricing.js`, `src/storage.js`, `src/App.jsx`, `CLAUDE.md` |
+| 2026-05-29 | Printing-attribute registry: `src/printing-attributes.js` declares all variants as `{ key, label, mode: 'text'\|'regex', value }`. Builtins are `parallel` and `manga`; users add their own (event-stamp etc.) via the **Manage variants** modal in the (then-)Resolve view. Detection, match scoring, diagnosis, and UI pills all iterate the list. Catalog cache key bumps to v10 and includes a fingerprint of the active ruleset. `card.attributes: string[]` replaces the per-facet booleans as the source of truth; `isParallel` / `isManga` are kept as derived shortcuts for back-compat. Per-card overrides live in `src/card-attribute-overrides.js`: differential `{add, remove}` so adding "manga" to a specific card survives later detection-rule changes. Canonical IDs are still rooted in *detected* attributes so overrides don't break references in entries / transactions / watchlist. | User reported manga rares were getting matched as parallels; the fix was to make manga its own facet. Generalizing the regex registry made adding future variants (event stamps, language tags, etc.) a one-line registry edit instead of a touchpoint in every consumer. Per-card overrides cover the case where TCGPlayer's product name doesn't include the right keyword. | `src/printing-attributes.js`, `src/card-attribute-overrides.js`, `src/catalog.js`, `src/pricing.js`, `src/App.jsx` |
+| 2026-05-29 | Payouts: new transaction `type: 'payout'` for cash leaving the pool to one or more members. `PayoutModal` mirrors `ExpenseModal`'s recipient-split shape; EquityPanel's `signedContribsOf` treats `payout` like `sell` (negates each recipient's contribution so equity drops). Stat row + filter + delete-label all updated. | User asked to log "either payouts or negative expenses" for cash outflow. Picked the dedicated `payout` type so equity math is unambiguous: payout = pool → member (reduces equity), expense = pool → external vendor (raises cost basis). | `src/App.jsx` |
+| 2026-05-29 | Search in the Resolve view: text input that narrows the current queue case-insensitively against `card.name` / `card.displayId` / `card.id` / `card.setName`. Resets the index to 0 on change. Auto-resolve gated to Unresolved / Issues queues only — In All, In-collection, Reported, navigating to a card no longer silently saves a resolution. | Browsing the catalog via Resolve was awkward without a search box, and the per-card auto-resolve effect was over-eager (saved confident matches on every card the user clicked through, even outside a deliberate resolve workflow). | `src/App.jsx` |
+| 2026-05-29 | Catalog-drawer reports flow into the Reported queue via a new `onMatchReportChanged` pub/sub. `reportBadMatch` / `clearMatchReport` emit; ResolveView subscribes to bump `resolveRev` so counts/queue recompute even when the report happens in the detail drawer overlaying the page. | The drawer's local `bumpResolutionTick` only re-rendered the drawer itself; the Resolve queue stayed stale until the user touched a local control. | `src/pricing.js`, `src/App.jsx` |
+| 2026-06-01 | **Catalog source switched OPTCGAPI → TCGPlayer (the big one).** Catalog comes from `/api/tcgcsv?groups=1` + `/api/tcgcsv?groupAbbr=X` iterated per group with browser concurrency 6. The proxy was extended with `?all=1`, `?groups=1`, `?groupAbbr=X`, and the per-group path was made independent of the full-index build so cold serverless calls fit Vercel's timeout (the original `?all=1` 502'd). Catalog cards now ARE TCGPlayer products: `card.tcg_id`, `card.imageUrl`, `card.tcgplayerUrl`, `card.marketPrice` baked in. The override picker workflow is retired — the catalog already knows the tcg_id. `runTcgplayerMigration` (`optcg:tcgplayer-migration:v1`) rewrites OPTCGAPI-era canonicals to the new attribute-tag form via each saved resolution's `tcg_id` as a bridge (high-confidence) with a displayId+variant fallback for unresolved entries. The PSA matcher was widened to handle the new TCGPlayer-style names + sub-token set match (PSA "OP14" → OP14 + OP14 RE + OP14 ANN). Trade: no more game data (color, cost, power, life, counter, attribute, sub_types, card text) but complete printing coverage including release-event and tournament-prize sets OPTCGAPI never shipped. `api/optcg-history.js` deleted. | OPTCGAPI didn't carry release-event variants, tournament prize cards, anniversary prints, etc. — significant gaps for the user's actual collection. TCGPlayer is the source-of-truth for what's actually purchasable and has those gaps filled. The catalog-IS-TCGPlayer-product model also collapses an entire layer of complexity (the per-card resolve workflow). | `src/catalog.js`, `src/pricing.js`, `src/migrate.js`, `src/App.jsx`, `api/tcgcsv.js`, `vite.config.js`, deleted `api/optcg-history.js` |
+| 2026-06-01 | Catalog tab rebrand (was "Resolve"). Nav button + page title + subtitle + filter dropdown all reframed — Browse / In my collections / Reported by me. Per-card view dropped the side-by-side OPTCG-vs-TCGPlayer compare in favor of a single hero + "Related printings" list (clickable buttons that open the sibling card's drawer). Save & Next button + the diagnostic panel + searchTcgProducts and the auto-resolve effect all removed. CardDetailDrawer's TCGPlayer match panel reads from the catalog card directly (not the resolution layer). Search view's Color / Type / Cost / Power refine + Hide dimensions removed (no data behind them after the source switch). 14-day price-history chart + PriceChart component + card.text hero line all dropped. Net: +80 / -415 lines. | The override picker was a leftover from the OPTCGAPI-source workflow. Every distinct TCGPlayer printing is now its own catalog entry, so there's nothing to override — you just navigate to the right entry. | `src/App.jsx`, `src/catalog.js`, `src/styles.css` |
+| 2026-06-01 | Catalog is now authoritative for image/link. `getCachedImageForCard` no longer consults the resolution layer (it preferred `resolution.image_url` over `card.imageUrl`, which caused "SP Silver image but the link goes to SP Gold" drift when the heuristic's pick disagreed with the catalog's assigned product). `useEnhancedImage` stops calling `autoResolveCard` on viewport entry — that was the source of bad resolutions. `runClearLegacyResolutions` (`optcg:clear-resolutions:v1`) wipes the in-memory Map + localStorage warm-start + Supabase `card_resolutions` rows for this vault on first boot so nothing stale leaks through. New `store.deleteAllResolutions` (shared mode) backs the wipe. | Concrete user-reported bug: Marshall.D.Teach SP Silver showed SP Silver's image but the TCGPlayer link went to SP Gold. Two products share the card number; the heuristic and the catalog picked different ones. Making the catalog the single source of truth eliminates the whole class of drift. | `src/pricing.js`, `src/storage.js`, `src/migrate.js`, `src/App.jsx` |
+| 2026-06-01 | Surface Supabase insert errors in the alert. `storage.js` captures `error.code/message/details/hint` to `lastStoreError`; `addEntry` reads it via `getLastStoreError()` and includes the detail in the "Couldn't save the entry" alert. | The generic alert sent the user to the console; concrete reports were easier than diagnosing remotely. The first real use diagnosed a missing `grade_description` column without round-trips. | `src/storage.js`, `src/App.jsx` |
+| 2026-06-02 | Cleanup sweep via `/cleanup` (post-rebrand). Dropped unused exports/imports across App.jsx, pricing.js, catalog.js, printing-attributes.js, card-attribute-overrides.js, psa.js, storage.js. Deleted `searchTcgProducts`, `pickBestMatchForCard`, `confidentMatchForCard`, `autoResolveCard`, `diagnoseResolution`, `cardNumberFromCanonical`, `getAllMatchReports`, `matchCatalogCard`, `listUserVariants`, `updateUserVariant`, `clearCardAttributeOverride`, `clearLastStoreError`. Unexported `getTcgId` (pricing.js) and `canonicalIdOf` (catalog.js). Internal helpers `cardHasAttr`/`productHasAttr` dropped along with their callers. Stale CSS removed: `op-chart*`, `op-drawer-hero-text`, `op-graded-caveat`, `op-prefetch-*` family, `op-resolve-meta/name/sub/prices/price-*/diag-head`. Net: +41 / -344 lines. | Codebase had accumulated leftovers from the catalog-source switch, override-picker removal, and per-card override refactor. | `src/App.jsx`, `src/pricing.js`, `src/catalog.js`, `src/printing-attributes.js`, `src/card-attribute-overrides.js`, `src/psa.js`, `src/storage.js`, `src/styles.css` |
+| 2026-06-02 | Remote bug-fix pipeline spec integrated from `directions/REMOTE_BUGFIX_PIPELINE.md`. Four-phase initiative: in-site bug reporter → Supabase→GitHub bridge → Claude Code auto-fix via GitHub Actions → mobile notifications. Captured as a cross-cutting initiative section in PLANNING.md plus a status snapshot row. Forces the long-pending "real Supabase Auth?" decision because the `bug_reports` table needs a real `reporter_id`. | The user wanted a way to report bugs from a phone away from the dev machine and get a Vercel preview link back. Off the main pricing roadmap but high personal leverage. | `PLANNING.md` (this file) |
 
 ### Decisions explicitly **not** taken (despite the context doc)
 
@@ -236,15 +308,21 @@ New, from current code state:
 
 - **Real auth before sharing publicly?** Today's vault-key model is fine for
   a known friend group; it's the wrong basis for any user-facing alerting.
+  The bug-reporter initiative needs a `reporter_id`, which forces this
+  question.
 - **Append-only constraints on `transactions`** — keep current delete-tx UX
   or move to a soft-delete / void model to preserve audit trail?
 - ~~**Card identity refactor (`card_mappings` table)** — wait until a second
-  pricing source is being added, or pre-empt it now?~~ **Resolved 2026-05-27**:
-  pre-empted via canonical IDs + one-time migration (see Decisions Log). No
-  separate `card_mappings` table; per-source IDs live on the rows that use
-  them.
+  pricing source is being added, or pre-empt it now?~~ **Resolved 2026-05-27
+  / 2026-06-01**: pre-empted via canonical IDs, twice. First via the OPTCGAPI-
+  era canonical form, then rewritten to the TCGPlayer attribute-tag form on
+  the source switch. No separate `card_mappings` table; the TCGPlayer
+  `productId` lives directly on the catalog card.
 - **Watchlist scraping target** — TCGPlayer first (matches existing catalog
-  bridge via `tcg-id`)? eBay first (richer for alerts)? Both?
+  bridge via `tcg_id`)? eBay first (richer for alerts)? Both?
+- **JP / Korean catalog support** — pending design discussion. TCGPlayer is
+  English-only; a JP source (Bandai's official catalog, Yuyu-tei, etc.)
+  would need its own data pipeline and pricing source. Parked.
 - **Move `VITE_PSA_TOKEN` to a non-`VITE_` server-only var** — the token is
   in the client bundle today even though only the server actually needs it.
   Low priority; not exploitable through the proxy alone, but it's an
