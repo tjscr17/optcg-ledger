@@ -221,15 +221,31 @@ export const fetchPriceSnapshot = async (tcgId, { force = false } = {}) => {
   return promise;
 };
 
+// Returns the effective tcg_id for a card: a user-saved resolution wins
+// (override), else the catalog card's built-in `tcg_id` (TCGPlayer-source
+// catalog), else null. Pre-2026-06-01 catalog cards had no built-in tcg_id
+// and relied entirely on the resolution layer; that path still works.
+export const effectiveTcgId = (card) => {
+  if (!card) return null;
+  const override = getTcgId(card.canonicalId, card.id);
+  if (override) return override;
+  const baked = Number(card.tcg_id);
+  return Number.isFinite(baked) && baked > 0 ? baked : null;
+};
+
 // Card-level convenience: returns the TCGCSV market price for a catalog
-// card object (uses canonicalId for the tcg_id lookup, falls back to the
-// legacy id). Returns null if we don't have a tcg_id mapping yet or no
-// fresh market price is cached. Pure read — does not trigger a fetch.
+// card. Reads from the price cache; pure (no fetch). Prefers an override
+// resolution, falls back to the card's built-in tcg_id, then to the
+// catalog-baked marketPrice snapshot as a last resort.
 export const getMarketPriceForCard = (card) => {
   if (!card) return null;
-  const tcgId = getTcgId(card.canonicalId, card.id);
-  if (!tcgId) return null;
-  return getCachedMarketPrice(tcgId);
+  const tcgId = effectiveTcgId(card);
+  if (tcgId) {
+    const cached = getCachedMarketPrice(tcgId);
+    if (cached != null) return cached;
+  }
+  const baked = Number(card.marketPrice);
+  return Number.isFinite(baked) && baked > 0 ? baked : null;
 };
 
 // Synchronous image URL for a card whose OPTCGAPI image is missing.
@@ -244,7 +260,9 @@ export const getCachedImageForCard = (card) => {
   const cid = card.canonicalId || card.id;
   const resolution = getResolution(cid);
   if (resolution?.image_url) return resolution.image_url;
-  const tcgId = getTcgId(cid, card.id);
+  // TCGPlayer-sourced cards have imageUrl baked in.
+  if (card.imageUrl) return card.imageUrl;
+  const tcgId = effectiveTcgId(card);
   return tcgImageUrlFromId(tcgId);
 };
 
@@ -254,7 +272,7 @@ export const getCachedImageForCard = (card) => {
 // warm the cache can ignore the returned promise.
 export const ensurePriceForCard = async (card) => {
   if (!card) return null;
-  const tcgId = getTcgId(card.canonicalId, card.id);
+  const tcgId = effectiveTcgId(card);
   if (!tcgId) return null;
   if (isPriceFresh(tcgId)) return getCachedSnapshot(tcgId);
   return fetchPriceSnapshot(tcgId);

@@ -3,7 +3,7 @@ import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, 
 import { store, MODE, VAULT_LABEL } from './storage.js';
 import { loadCatalog, loadPriceHistory, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
-import { runCanonicalMigration, runPcCleanup } from './migrate.js';
+import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
   searchTcgProducts, saveResolution, getResolution, clearResolution, cardNumberFromCanonical,
@@ -205,6 +205,10 @@ export default function App() {
         // resolution cache, then drop the PC localStorage keys. Sync — fast
         // and no network.
         runPcCleanup();
+        // 2026-06-01 catalog-source switch: rewrite OPTCGAPI-era canonicals
+        // (OP14-118-p1) to the TCGPlayer-source form (OP14-118-parallel).
+        // Bridges via tcg_id from resolutions; falls back to displayId match.
+        await runTcgplayerMigration();
         await refreshData();
       } finally { setLoading(false); }
     })();
