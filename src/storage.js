@@ -106,6 +106,21 @@ const solo = {
 //   -- entry stamps entry_id onto any matching legacy buy tx the first time.
 //   --   alter table transactions add column if not exists entry_id text;
 //   --   notify pgrst, 'reload schema';
+//
+//   -- entries gains psa_spec_id + graded_price_source + graded_price_fetched_at
+//   -- for the graded-pricing pipeline (PSA APR Stage 1, eBay sold Stage 2).
+//   --   psa_spec_id text                 // PSA SpecID from the cert lookup;
+//   --                                    // used as the key for PSA APR refresh.
+//   --   graded_price_source text         // 'manual' | 'psa-apr' | 'ebay-sold'
+//   --   graded_price_fetched_at timestamptz
+//   --                                    // when the auto-fetched value was set;
+//   --                                    // a later Stage 4 background refresh
+//   --                                    // skips entries whose source is
+//   --                                    // 'manual' (preserves user overrides).
+//   --   alter table entries add column if not exists psa_spec_id text;
+//   --   alter table entries add column if not exists graded_price_source text;
+//   --   alter table entries add column if not exists graded_price_fetched_at timestamptz;
+//   --   notify pgrst, 'reload schema';
 //   create table entries (
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,

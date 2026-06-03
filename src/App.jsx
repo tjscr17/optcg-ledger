@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'r
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
-import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
+import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
@@ -1932,6 +1932,9 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
   const [collectionId, setCollectionId] = useState(activeCollectionId || collections[0]?.id || null);
   const [purchasePrice, setPurchasePrice] = useState('');
   const [gradedPrice, setGradedPrice] = useState('');
+  const [gradedPriceUserEdited, setGradedPriceUserEdited] = useState(false);
+  const [aprSuggestion, setAprSuggestion] = useState(null); // { suggested_price, sample_count, ... } | null
+  const [aprLoading, setAprLoading] = useState(false);
   const [contributions, setContributions] = useState([]);
   const [acquiredAt, setAcquiredAt] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState('');
@@ -1959,6 +1962,8 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
     setCandidates([]);
     setSelectedCardId('');
     setOverrideCardId('');
+    setAprSuggestion(null);
+    setGradedPriceUserEdited(false);
     const cleaned = certNumber.trim();
     if (!cleaned) { setError('Enter a cert number.'); return; }
     setLooking(true);
@@ -1972,6 +1977,19 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
       const cands = findCandidateCards(result, catalog);
       setCandidates(cands);
       if (cands.length > 0) setSelectedCardId(cands[0].id);
+      // Fire-and-forget APR lookup. Fills in a graded-price suggestion when
+      // PSA has enough recent sales for this spec at this grade.
+      if (result.spec_id && result.grade != null) {
+        setAprLoading(true);
+        fetchAuctionPrices({ specId: result.spec_id, grade: result.grade })
+          .then(apr => {
+            setAprSuggestion(apr);
+            if (apr?.suggested_price && !gradedPriceUserEdited) {
+              setGradedPrice(apr.suggested_price.toFixed(2));
+            }
+          })
+          .finally(() => setAprLoading(false));
+      }
     } catch (e) {
       setError(e.message || 'PSA lookup failed.');
     } finally {
@@ -1988,6 +2006,11 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
   const handleSave = async () => {
     if (!cert || !card) return;
     setSaving(true);
+    // If the price came from APR (and the user didn't override), stamp the
+    // source / fetched_at so a later auto-refresh can decide whether to
+    // refresh it without clobbering a manual override.
+    const usedAprSuggestion = !gradedPriceUserEdited && aprSuggestion?.suggested_price != null
+      && Math.abs(Number(gradedPrice) - aprSuggestion.suggested_price) < 0.01;
     await onSave({
       card_id: card.canonicalId || card.id,
       collection_id: collectionId,
@@ -2004,6 +2027,9 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
       bgs_black: false,
       cert_number: cert.cert_number,
       graded_price: Number(gradedPrice) || 0,
+      psa_spec_id: cert.spec_id || null,
+      graded_price_source: usedAprSuggestion ? 'psa-apr' : (gradedPriceUserEdited ? 'manual' : null),
+      graded_price_fetched_at: usedAprSuggestion ? new Date().toISOString() : null,
     });
     setSaving(false);
   };
@@ -2195,16 +2221,56 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                       Grade · {cert.grade_description || (cert.grade != null ? `PSA ${cert.grade}` : 'PSA')}
                     </div>
                     <div className="op-form-section-sub">
-                      Pulled from PSA. Enter a graded market price manually; auto-fetch is parked until a graded data source lands.
+                      Pulled from PSA. PSA APR auto-suggests a graded market price below — override if needed.
                     </div>
                   </div>
                 </div>
                 <Field label="Graded market price (USD)">
                   <input
                     type="number" step="0.01" placeholder="0.00"
-                    value={gradedPrice} onChange={(e) => setGradedPrice(e.target.value)}
+                    value={gradedPrice}
+                    onChange={(e) => { setGradedPrice(e.target.value); setGradedPriceUserEdited(true); }}
                   />
                 </Field>
+                {aprLoading && (
+                  <div className="op-resolve-side-sub">Looking up PSA APR…</div>
+                )}
+                {!aprLoading && aprSuggestion && (
+                  aprSuggestion.suggested_price != null ? (
+                    <div className={`op-resolve-diag is-ok`} style={{ marginTop: 4 }}>
+                      <div className="op-resolve-diag-row">
+                        <span>PSA APR suggestion</span>
+                        <strong>
+                          ${Number(aprSuggestion.suggested_price).toFixed(2)}
+                          {' '}
+                          <span style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>
+                            (median of {aprSuggestion.sample_count} sales · {aprSuggestion.window_days}d
+                            {aprSuggestion.low != null && aprSuggestion.high != null
+                              ? ` · $${aprSuggestion.low.toFixed(2)}–$${aprSuggestion.high.toFixed(2)}` : ''})
+                          </span>
+                        </strong>
+                      </div>
+                      {gradedPriceUserEdited && (
+                        <div className="op-resolve-diag-row">
+                          <button
+                            className="op-btn-ghost"
+                            style={{ padding: '2px 8px' }}
+                            onClick={() => {
+                              setGradedPrice(aprSuggestion.suggested_price.toFixed(2));
+                              setGradedPriceUserEdited(false);
+                            }}
+                          >
+                            Use APR suggestion
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="op-resolve-side-sub" style={{ marginTop: 4 }}>
+                      PSA APR has no recent sales for this card at PSA {cert.grade}. Enter a price manually.
+                    </div>
+                  )
+                )}
               </div>
 
               <Field label="Notes (optional)">

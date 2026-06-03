@@ -40,6 +40,122 @@ export default defineConfig(({ mode }) => {
           });
         },
       },
+      // Local-dev mirror of /api/psa-apr — PSA Auction Prices Realized lookup.
+      {
+        name: 'psa-apr-dev-proxy',
+        configureServer(server) {
+          const parseGradeFromString = (s) => {
+            if (s == null) return null;
+            const m = String(s).match(/(\d+(?:\.\d+)?)/);
+            if (!m) return null;
+            const n = parseFloat(m[1]);
+            return Number.isFinite(n) ? n : null;
+          };
+          const priceOf = (s) =>
+            Number(s?.SalePrice ?? s?.Price ?? s?.EndPrice ?? s?.PriceRealized ?? 0) || 0;
+          const dateOf = (s) =>
+            s?.SaleDate || s?.EndDate || s?.Date || s?.SaleDateTime || '';
+          const median = (nums) => {
+            if (!nums.length) return null;
+            const sorted = [...nums].sort((a, b) => a - b);
+            const mid = Math.floor(sorted.length / 2);
+            return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+          };
+
+          server.middlewares.use('/api/psa-apr', async (req, res) => {
+            const url = new URL(req.url, 'http://localhost');
+            res.setHeader('Content-Type', 'application/json');
+            const spec = (url.searchParams.get('spec') || '').trim();
+            if (!spec) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: 'spec query param is required' }));
+              return;
+            }
+            const gradeRaw = url.searchParams.get('grade');
+            const gradeWanted = gradeRaw != null && gradeRaw !== ''
+              ? parseGradeFromString(gradeRaw) : null;
+            const days = Math.max(1, Math.min(3650, Number(url.searchParams.get('days')) || 180));
+
+            const token = env.VITE_PSA_TOKEN || env.PSA_TOKEN;
+            if (!token) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: 'PSA token not configured' }));
+              return;
+            }
+            try {
+              const upstream = `https://api.psacard.com/publicapi/auctionprices/${encodeURIComponent(spec)}`;
+              const r = await fetch(upstream, { headers: { Authorization: `Bearer ${token}` } });
+              if (r.status === 404) {
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  spec_id: spec, grade: gradeWanted, window_days: days,
+                  suggested_price: null, sample_count: 0, sales: [],
+                  fetched_at: new Date().toISOString(), source: 'psa-apr',
+                  reason: `no PSA APR record for spec ${spec}`,
+                }));
+                return;
+              }
+              if (!r.ok) {
+                const body = await r.text();
+                res.statusCode = 502;
+                res.end(JSON.stringify({ error: `PSA APR upstream returned ${r.status}: ${body.slice(0, 200)}` }));
+                return;
+              }
+              const upstreamJson = await r.json();
+              const rawSales = Array.isArray(upstreamJson)
+                ? upstreamJson
+                : (upstreamJson?.AuctionPrices || upstreamJson?.SalesHistory || upstreamJson?.Sales || []);
+
+              const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+              const normalizedAll = rawSales
+                .map(s => ({
+                  date: dateOf(s),
+                  price: priceOf(s),
+                  grade: parseGradeFromString(s?.Grade ?? s?.GradeDescription),
+                  auction: s?.AuctionName || s?.Auction || s?.AuctionHouse || '',
+                  lot: s?.LotNumber || s?.Lot || '',
+                  url: s?.AuctionItemURL || s?.URL || s?.Url || '',
+                }))
+                .filter(s => s.date && s.price > 0);
+
+              const inWindow = normalizedAll.filter(s => {
+                const t = Date.parse(s.date);
+                return Number.isFinite(t) && t >= cutoff;
+              });
+
+              const gradeMatching = gradeWanted != null
+                ? inWindow.filter(s => s.grade != null && Math.abs(s.grade - gradeWanted) < 0.05)
+                : inWindow;
+
+              const prices = gradeMatching.map(s => s.price);
+              const suggested = median(prices);
+              const low = prices.length ? Math.min(...prices) : null;
+              const high = prices.length ? Math.max(...prices) : null;
+              const sorted = [...gradeMatching].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+              const mostRecent = sorted[0]?.date || null;
+
+              res.statusCode = 200;
+              res.end(JSON.stringify({
+                spec_id: spec,
+                grade: gradeWanted,
+                window_days: days,
+                suggested_price: suggested,
+                suggested_method: 'median',
+                sample_count: prices.length,
+                low,
+                high,
+                most_recent_sale_at: mostRecent,
+                sales: sorted.slice(0, 20),
+                fetched_at: new Date().toISOString(),
+                source: 'psa-apr',
+              }));
+            } catch (e) {
+              res.statusCode = 502;
+              res.end(JSON.stringify({ error: `PSA APR fetch failed: ${e.message || e}` }));
+            }
+          });
+        },
+      },
       // Local-dev mirror of /api/tcgcsv. Same caching semantics as the
       // Vercel function — module-level Maps live for the dev server's
       // lifetime, which is usually more forgiving than serverless cold

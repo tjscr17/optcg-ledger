@@ -27,6 +27,26 @@ const parseGrade = (s) => {
   return Number.isFinite(n) ? n : null;
 };
 
+// Fetch PSA Auction Prices Realized for a spec id, optionally filtered to a
+// specific grade. Returns a suggestion object with the median price, sample
+// count, and a small slice of recent sales for display. Returns null on
+// network failure (the modal degrades to a manual entry path).
+//
+// Response shape mirrors what `/api/psa-apr` returns.
+export const fetchAuctionPrices = async ({ specId, grade, days = 180 } = {}) => {
+  if (!specId) return null;
+  const qs = new URLSearchParams({ spec: String(specId), days: String(days) });
+  if (grade != null) qs.set('grade', String(grade));
+  try {
+    const r = await fetch(`/api/psa-apr?${qs.toString()}`);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    console.warn('[psa-apr] fetch failed', e);
+    return null;
+  }
+};
+
 // Fetch a PSA cert by its cert number. Returns a normalized object on
 // success or null if the cert isn't found. Throws on auth/network errors.
 // Routes through /api/psa to dodge PSA's CORS block on browser callers.
