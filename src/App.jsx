@@ -326,20 +326,35 @@ export default function App() {
       alert('PSA token missing — set VITE_PSA_TOKEN to use APR refresh.');
       return;
     }
-    const targets = entries.filter(e =>
+    // Skip entries we already refreshed within the last 24h. PSA's free
+    // tier is 100 calls/day and a single full sweep on a ~34-entry
+    // collection already busts it; the skip avoids double-burning when
+    // the user clicks Refresh twice. Manual entries are also skipped so
+    // an explicit override isn't clobbered.
+    const FRESH_MS = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const allCandidates = entries.filter(e =>
       (e.grading_company || '').toUpperCase() === 'PSA' &&
       e.cert_number &&
       e.graded_price_source !== 'manual'
     );
+    const targets = allCandidates.filter(e => {
+      const t = e.graded_price_fetched_at ? Date.parse(e.graded_price_fetched_at) : 0;
+      return !(t && now - t < FRESH_MS);
+    });
+    const skippedFresh = allCandidates.length - targets.length;
     if (targets.length === 0) {
-      alert('No PSA-graded entries to refresh. (Entries marked as a manual override are skipped.)');
+      alert(`Nothing to refresh — ${allCandidates.length} PSA-graded entries are all already fresh (<24h old) or marked manual.`);
       return;
     }
-    setGradedRefresh({ running: true, done: 0, total: targets.length, updated: 0, noData: 0, skipped: 0, error: 0, breakdown: { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0 } });
+    if (skippedFresh > 0) {
+      console.info(`[graded-refresh] skipping ${skippedFresh} entries refreshed within the last 24h`);
+    }
+    setGradedRefresh({ running: true, done: 0, total: targets.length, updated: 0, noData: 0, skipped: skippedFresh, error: 0, breakdown: { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0, quotaExceeded: 0 } });
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
     let updated = 0, noData = 0, errCount = 0;
-    const breakdown = { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0 };
+    const breakdown = { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0, quotaExceeded: 0 };
     const sample = []; // first few no-data entries for the console log
     for (const entry of targets) {
       try {
@@ -367,10 +382,11 @@ export default function App() {
             setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...patch } : e));
             updated++;
           } else {
-            // Diagnose why no suggestion came back. The three buckets answer
-            // "is PSA APR empty for this game?" vs "is the window too tight?"
-            // vs "is the grade just not represented?".
-            if ((apr?.upstream_total || 0) === 0) breakdown.psaHasNothing++;
+            // Diagnose why no suggestion came back. Four buckets answer
+            // "quota exhausted (429)?" vs "PSA has nothing for the SpecID"
+            // vs "only older sales" vs "only sales at other grades".
+            if (apr?.upstream_status === 429) breakdown.quotaExceeded++;
+            else if ((apr?.upstream_total || 0) === 0) breakdown.psaHasNothing++;
             else if ((apr?.in_window_total || 0) === 0) breakdown.windowEmpty++;
             else breakdown.gradeMissed++;
             if (sample.length < 5) sample.push({
@@ -1024,10 +1040,17 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
             <div className="op-resolve-diag-row">
               <span>Why "no PSA APR data"</span>
               <strong style={{ fontWeight: 400 }}>
-                {gradedRefresh.breakdown.psaHasNothing > 0 && `${gradedRefresh.breakdown.psaHasNothing} PSA has no sales at all`}
+                {gradedRefresh.breakdown.quotaExceeded > 0 && `${gradedRefresh.breakdown.quotaExceeded} PSA daily quota exceeded (100/day) — wait ~24h`}
+                {gradedRefresh.breakdown.psaHasNothing > 0 && `${gradedRefresh.breakdown.quotaExceeded > 0 ? ' · ' : ''}${gradedRefresh.breakdown.psaHasNothing} PSA has no sales at all`}
                 {gradedRefresh.breakdown.windowEmpty > 0 && ` · ${gradedRefresh.breakdown.windowEmpty} only older than 365d`}
                 {gradedRefresh.breakdown.gradeMissed > 0 && ` · ${gradedRefresh.breakdown.gradeMissed} sales at other grades only`}
               </strong>
+            </div>
+          )}
+          {gradedRefresh.skipped > 0 && (
+            <div className="op-resolve-diag-row">
+              <span>Skipped (fresh &lt; 24h)</span>
+              <strong style={{ fontWeight: 400 }}>{gradedRefresh.skipped}</strong>
             </div>
           )}
         </div>

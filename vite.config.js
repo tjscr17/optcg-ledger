@@ -41,6 +41,9 @@ export default defineConfig(({ mode }) => {
         },
       },
       // Local-dev mirror of /api/psa-apr — PSA Auction Prices Realized lookup.
+      // The Vercel function memoizes responses for 24h; this dev mirror
+      // doesn't (you'd notice quickly in `npm run dev` and the prod cache
+      // is the important one).
       {
         name: 'psa-apr-dev-proxy',
         configureServer(server) {

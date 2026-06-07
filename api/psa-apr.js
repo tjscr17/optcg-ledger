@@ -35,6 +35,14 @@
 const PSA_APR_URL = (specId) =>
   `https://api.psacard.com/publicapi/auctionprices/${encodeURIComponent(specId)}`;
 
+// Server-side memoization. PSA's free tier is 100 calls/day, and a single
+// bulk-refresh on a ~34-entry collection already busts it. We cache the raw
+// upstream response per SpecID for 24h so duplicates within a warm function
+// instance don't re-hit PSA. Cold starts lose this — a Supabase-backed cache
+// would survive across instances but module memory is the cheapest first cut.
+const APR_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const aprCache = new Map(); // specId → { fetchedAt, upstreamStatus, upstreamJson, upstreamRawSample }
+
 const parseGradeFromString = (s) => {
   if (s == null) return null;
   const m = String(s).match(/(\d+(?:\.\d+)?)/);
@@ -80,49 +88,66 @@ export default async function handler(req, res) {
   let upstreamJson;
   let upstreamStatus = 0;
   let upstreamRawSample = '';
+  let fromCache = false;
   const upstreamUrl = PSA_APR_URL(specRaw);
-  try {
-    const r = await fetch(upstreamUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    upstreamStatus = r.status;
-    const bodyText = await r.text();
-    upstreamRawSample = bodyText.slice(0, 500);
-    if (!r.ok) {
-      // Surface upstream status verbatim so the client can distinguish
-      // "endpoint missing" (404 = wrong URL) from "no data" (200 + empty)
-      // from "auth wrong" (401/403) from upstream outage (5xx). The previous
-      // 404→synthetic-success path was misleading us.
-      res.status(200).json({
-        spec_id: specRaw, grade: gradeWanted, window_days: days,
-        suggested_price: null, sample_count: 0, sales: [],
-        upstream_total: 0, in_window_total: 0, grade_breakdown: {},
-        fetched_at: new Date().toISOString(), source: 'psa-apr',
-        upstream_status: upstreamStatus,
-        upstream_url: upstreamUrl,
-        upstream_body_sample: upstreamRawSample,
-        reason: `PSA APR upstream returned ${upstreamStatus} for ${upstreamUrl}`,
-      });
-      return;
-    }
+
+  const cached = aprCache.get(specRaw);
+  if (cached && Date.now() - cached.fetchedAt < APR_CACHE_TTL_MS) {
+    upstreamJson = cached.upstreamJson;
+    upstreamStatus = cached.upstreamStatus;
+    upstreamRawSample = cached.upstreamRawSample;
+    fromCache = true;
+  }
+
+  if (!fromCache) {
     try {
-      upstreamJson = JSON.parse(bodyText);
-    } catch {
-      res.status(200).json({
-        spec_id: specRaw, grade: gradeWanted, window_days: days,
-        suggested_price: null, sample_count: 0, sales: [],
-        upstream_total: 0, in_window_total: 0, grade_breakdown: {},
-        fetched_at: new Date().toISOString(), source: 'psa-apr',
-        upstream_status: upstreamStatus,
-        upstream_url: upstreamUrl,
-        upstream_body_sample: upstreamRawSample,
-        reason: 'PSA APR returned non-JSON body',
+      const r = await fetch(upstreamUrl, {
+        headers: { Authorization: `Bearer ${token}` },
       });
+      upstreamStatus = r.status;
+      const bodyText = await r.text();
+      upstreamRawSample = bodyText.slice(0, 500);
+      if (!r.ok) {
+        // Surface upstream status verbatim so the client can distinguish
+        // "endpoint missing" (404) from "no data" (200 + empty) from "auth
+        // wrong" (401/403) from "quota exhausted" (429). Don't cache —
+        // tomorrow the call could succeed (e.g. 429 quota reset).
+        res.status(200).json({
+          spec_id: specRaw, grade: gradeWanted, window_days: days,
+          suggested_price: null, sample_count: 0, sales: [],
+          upstream_total: 0, in_window_total: 0, grade_breakdown: {},
+          fetched_at: new Date().toISOString(), source: 'psa-apr',
+          upstream_status: upstreamStatus,
+          upstream_url: upstreamUrl,
+          upstream_body_sample: upstreamRawSample,
+          from_cache: false,
+          reason: `PSA APR upstream returned ${upstreamStatus} for ${upstreamUrl}`,
+        });
+        return;
+      }
+      try {
+        upstreamJson = JSON.parse(bodyText);
+      } catch {
+        res.status(200).json({
+          spec_id: specRaw, grade: gradeWanted, window_days: days,
+          suggested_price: null, sample_count: 0, sales: [],
+          upstream_total: 0, in_window_total: 0, grade_breakdown: {},
+          fetched_at: new Date().toISOString(), source: 'psa-apr',
+          upstream_status: upstreamStatus,
+          upstream_url: upstreamUrl,
+          upstream_body_sample: upstreamRawSample,
+          from_cache: false,
+          reason: 'PSA APR returned non-JSON body',
+        });
+        return;
+      }
+      // Cache the successful upstream payload — duplicate SpecIDs within
+      // 24h are now free of PSA quota cost.
+      aprCache.set(specRaw, { fetchedAt: Date.now(), upstreamStatus, upstreamJson, upstreamRawSample });
+    } catch (e) {
+      res.status(502).json({ error: `PSA APR fetch failed: ${e.message || e}`, upstream_url: upstreamUrl });
       return;
     }
-  } catch (e) {
-    res.status(502).json({ error: `PSA APR fetch failed: ${e.message || e}`, upstream_url: upstreamUrl });
-    return;
   }
 
   // PSA returns either `{ AuctionPrices: [...] }` or an array directly,
@@ -186,6 +211,7 @@ export default async function handler(req, res) {
     upstream_status: upstreamStatus,
     upstream_url: upstreamUrl,
     upstream_body_sample: upstreamRawSample,
+    from_cache: fromCache,
     fetched_at: new Date().toISOString(),
     source: 'psa-apr',
   });
