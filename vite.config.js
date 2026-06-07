@@ -82,26 +82,38 @@ export default defineConfig(({ mode }) => {
               res.end(JSON.stringify({ error: 'PSA token not configured' }));
               return;
             }
+            const upstreamUrl = `https://api.psacard.com/publicapi/auctionprices/${encodeURIComponent(spec)}`;
             try {
-              const upstream = `https://api.psacard.com/publicapi/auctionprices/${encodeURIComponent(spec)}`;
-              const r = await fetch(upstream, { headers: { Authorization: `Bearer ${token}` } });
-              if (r.status === 404) {
+              const r = await fetch(upstreamUrl, { headers: { Authorization: `Bearer ${token}` } });
+              const bodyText = await r.text();
+              const sample = bodyText.slice(0, 500);
+              if (!r.ok) {
                 res.statusCode = 200;
                 res.end(JSON.stringify({
                   spec_id: spec, grade: gradeWanted, window_days: days,
                   suggested_price: null, sample_count: 0, sales: [],
+                  upstream_total: 0, in_window_total: 0, grade_breakdown: {},
+                  upstream_status: r.status, upstream_url: upstreamUrl, upstream_body_sample: sample,
                   fetched_at: new Date().toISOString(), source: 'psa-apr',
-                  reason: `no PSA APR record for spec ${spec}`,
+                  reason: `PSA APR upstream returned ${r.status} for ${upstreamUrl}`,
                 }));
                 return;
               }
-              if (!r.ok) {
-                const body = await r.text();
-                res.statusCode = 502;
-                res.end(JSON.stringify({ error: `PSA APR upstream returned ${r.status}: ${body.slice(0, 200)}` }));
+              let upstreamJson;
+              try { upstreamJson = JSON.parse(bodyText); }
+              catch {
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  spec_id: spec, grade: gradeWanted, window_days: days,
+                  suggested_price: null, sample_count: 0, sales: [],
+                  upstream_total: 0, in_window_total: 0, grade_breakdown: {},
+                  upstream_status: r.status, upstream_url: upstreamUrl, upstream_body_sample: sample,
+                  fetched_at: new Date().toISOString(), source: 'psa-apr',
+                  reason: 'PSA APR returned non-JSON body',
+                }));
                 return;
               }
-              const upstreamJson = await r.json();
+              const _r = { status: r.status, _sample: sample };
               const rawSales = Array.isArray(upstreamJson)
                 ? upstreamJson
                 : (upstreamJson?.AuctionPrices || upstreamJson?.SalesHistory || upstreamJson?.Sales || []);
@@ -155,6 +167,9 @@ export default defineConfig(({ mode }) => {
                 upstream_total: normalizedAll.length,
                 in_window_total: inWindow.length,
                 grade_breakdown: gradeBreakdown,
+                upstream_status: _r.status,
+                upstream_url: upstreamUrl,
+                upstream_body_sample: _r._sample,
                 fetched_at: new Date().toISOString(),
                 source: 'psa-apr',
               }));

@@ -78,27 +78,50 @@ export default async function handler(req, res) {
   }
 
   let upstreamJson;
+  let upstreamStatus = 0;
+  let upstreamRawSample = '';
+  const upstreamUrl = PSA_APR_URL(specRaw);
   try {
-    const r = await fetch(PSA_APR_URL(specRaw), {
+    const r = await fetch(upstreamUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (r.status === 404) {
+    upstreamStatus = r.status;
+    const bodyText = await r.text();
+    upstreamRawSample = bodyText.slice(0, 500);
+    if (!r.ok) {
+      // Surface upstream status verbatim so the client can distinguish
+      // "endpoint missing" (404 = wrong URL) from "no data" (200 + empty)
+      // from "auth wrong" (401/403) from upstream outage (5xx). The previous
+      // 404→synthetic-success path was misleading us.
       res.status(200).json({
         spec_id: specRaw, grade: gradeWanted, window_days: days,
         suggested_price: null, sample_count: 0, sales: [],
+        upstream_total: 0, in_window_total: 0, grade_breakdown: {},
         fetched_at: new Date().toISOString(), source: 'psa-apr',
-        reason: `no PSA APR record for spec ${specRaw}`,
+        upstream_status: upstreamStatus,
+        upstream_url: upstreamUrl,
+        upstream_body_sample: upstreamRawSample,
+        reason: `PSA APR upstream returned ${upstreamStatus} for ${upstreamUrl}`,
       });
       return;
     }
-    if (!r.ok) {
-      const body = await r.text();
-      res.status(502).json({ error: `PSA APR upstream returned ${r.status}: ${body.slice(0, 200)}` });
+    try {
+      upstreamJson = JSON.parse(bodyText);
+    } catch {
+      res.status(200).json({
+        spec_id: specRaw, grade: gradeWanted, window_days: days,
+        suggested_price: null, sample_count: 0, sales: [],
+        upstream_total: 0, in_window_total: 0, grade_breakdown: {},
+        fetched_at: new Date().toISOString(), source: 'psa-apr',
+        upstream_status: upstreamStatus,
+        upstream_url: upstreamUrl,
+        upstream_body_sample: upstreamRawSample,
+        reason: 'PSA APR returned non-JSON body',
+      });
       return;
     }
-    upstreamJson = await r.json();
   } catch (e) {
-    res.status(502).json({ error: `PSA APR fetch failed: ${e.message || e}` });
+    res.status(502).json({ error: `PSA APR fetch failed: ${e.message || e}`, upstream_url: upstreamUrl });
     return;
   }
 
@@ -157,11 +180,12 @@ export default async function handler(req, res) {
     high,
     most_recent_sale_at: mostRecent,
     sales: sorted.slice(0, 20),
-    // Counts to distinguish "PSA has zero data" from "PSA has data but
-    // filters drop it all":
-    upstream_total: normalizedAll.length,    // sales PSA returned at any time / any grade
-    in_window_total: inWindow.length,        // sales within `days`
-    grade_breakdown: gradeBreakdown,         // {"10": 0, "9": 4, ...} within window
+    upstream_total: normalizedAll.length,
+    in_window_total: inWindow.length,
+    grade_breakdown: gradeBreakdown,
+    upstream_status: upstreamStatus,
+    upstream_url: upstreamUrl,
+    upstream_body_sample: upstreamRawSample,
     fetched_at: new Date().toISOString(),
     source: 'psa-apr',
   });

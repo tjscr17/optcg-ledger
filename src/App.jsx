@@ -373,7 +373,18 @@ export default function App() {
             if ((apr?.upstream_total || 0) === 0) breakdown.psaHasNothing++;
             else if ((apr?.in_window_total || 0) === 0) breakdown.windowEmpty++;
             else breakdown.gradeMissed++;
-            if (sample.length < 5) sample.push({ entry_id: entry.id, spec_id: specId, grade: entry.grade, upstream_total: apr?.upstream_total, in_window_total: apr?.in_window_total, grade_breakdown: apr?.grade_breakdown });
+            if (sample.length < 5) sample.push({
+              entry_id: entry.id,
+              spec_id: specId,
+              grade: entry.grade,
+              upstream_status: apr?.upstream_status,
+              upstream_url: apr?.upstream_url,
+              upstream_total: apr?.upstream_total,
+              in_window_total: apr?.in_window_total,
+              grade_breakdown: apr?.grade_breakdown,
+              upstream_body_sample: apr?.upstream_body_sample,
+              reason: apr?.reason,
+            });
             if (specPatch) {
               await store.update('entries', entry.id, specPatch);
               setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...specPatch } : e));
