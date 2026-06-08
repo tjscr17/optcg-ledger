@@ -4486,21 +4486,46 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                   // Prefer the live-matched canonical id (handles aliases +
                   // current variant rules) over whatever the scraper stored.
                   const variant = variantSuffixOf(s._effectiveCardId || s.card_id);
-                  return (
-                    <div key={s.id} className="op-drawer-sale-row">
-                      <div className="op-drawer-sale-meta">
-                        <span className="op-tag op-tag-variant">{variant || 'base'}</span>
-                        {s.grading_company && (
-                          <span className="op-tag op-tag-grade">
-                            {s.grading_company} {s.grade}{s.bgs_black ? ' BLK' : ''}
-                          </span>
+                  const inner = (
+                    <>
+                      <div className="op-drawer-sale-main">
+                        <div className="op-drawer-sale-meta">
+                          <span className="op-tag op-tag-variant">{variant || 'base'}</span>
+                          {s.grading_company && (
+                            <span className="op-tag op-tag-grade">
+                              {s.grading_company} {s.grade}{s.bgs_black ? ' BLK' : ''}
+                            </span>
+                          )}
+                          <span className="op-tag op-tag-market">{s.marketplace}</span>
+                        </div>
+                        {s.listing_title && (
+                          <div className="op-drawer-sale-title">{s.listing_title}</div>
                         )}
-                        <span className="op-tag op-tag-market">{s.marketplace}</span>
                       </div>
                       <div className="op-drawer-sale-side">
                         <div className="op-drawer-sale-price">${Number(s.sale_price).toFixed(2)}</div>
                         <div className="op-drawer-sale-date">{s.sale_date}</div>
+                        {s.listing_url && <ExternalLink size={12} className="op-drawer-sale-icon" />}
                       </div>
+                    </>
+                  );
+                  // Row is a link when we have a URL — opens the listing in a
+                  // new tab so the user can verify the match against the
+                  // actual eBay/Goldin/etc. listing.
+                  return s.listing_url ? (
+                    <a
+                      key={s.id}
+                      href={s.listing_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="op-drawer-sale-row op-drawer-sale-row-link"
+                      title="Open original listing in a new tab"
+                    >
+                      {inner}
+                    </a>
+                  ) : (
+                    <div key={s.id} className="op-drawer-sale-row">
+                      {inner}
                     </div>
                   );
                 })}
