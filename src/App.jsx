@@ -42,6 +42,37 @@ const attrsOf = (obj) => {
 };
 const attrLabel = (key) => printingAttribute(key)?.label || key;
 
+// Extract the bare displayId from a canonical card_id. Used to bucket sales
+// across variant printings of the same card number — opening the parallel
+// printing should surface base / manga / parallel sales together so the
+// user sees the whole market for that card number.
+//   OP01-016                     → OP01-016
+//   OP01-016-parallel            → OP01-016
+//   OP01-016-manga-parallel      → OP01-016
+//   OP14RE:OP14-118              → OP14-118 (drops source-set prefix)
+//   OP01-003__pre-errata         → OP01-003 (legacy pre-2026-06-01 form)
+function displayIdOf(canonicalCardId) {
+  if (!canonicalCardId) return null;
+  let s = String(canonicalCardId).replace(/__pre-errata$/, '');
+  const colonIdx = s.indexOf(':');
+  if (colonIdx > -1) s = s.slice(colonIdx + 1);
+  const m = s.match(/^([A-Z]{2,4}\d{2}-[A-Z]?\d{2,3}[A-Z]?)/i);
+  return m ? m[1].toUpperCase() : null;
+}
+
+// Pull the variant suffix (everything after the displayId) from a canonical
+// card_id, or return null for a base printing. Used to label each sale in
+// the drawer's recent-sales panel so the user can tell parallel from base
+// at a glance.
+function variantSuffixOf(canonicalCardId) {
+  if (!canonicalCardId) return null;
+  let s = String(canonicalCardId).replace(/__pre-errata$/, '');
+  const colonIdx = s.indexOf(':');
+  if (colonIdx > -1) s = s.slice(colonIdx + 1);
+  const m = s.match(/^[A-Z]{2,4}\d{2}-[A-Z]?\d{2,3}[A-Z]?-(.+)$/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
 // optional escape hatches for non-JSON-friendly values (e.g. Sets).
 const useStoredState = (key, initial, opts = {}) => {
@@ -810,7 +841,19 @@ export default function App() {
           entries={entries.filter(e => e.card_id === detailCid)}
           collections={collections}
           watchEntry={watchlist.find(w => w.card_id === detailCid) || null}
-          recentSales={sales.filter(s => s.card_id === detailCid).sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || '')).slice(0, 12)}
+          recentSales={(() => {
+            // Match sales to the open card by *displayId* (e.g. OP01-016)
+            // rather than full canonical id, so opening the parallel printing
+            // also surfaces sales tagged base / manga / pre-errata. The user
+            // wants market context for the whole card-number family, not
+            // just the one variant the entry happens to be tagged with.
+            const openDisplayId = displayIdOf(detailCid);
+            if (!openDisplayId) return [];
+            return sales
+              .filter(s => displayIdOf(s.card_id) === openDisplayId)
+              .sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || ''))
+              .slice(0, 20);
+          })()}
           onLogSale={() => { setLogSaleFor({ card: detailCard }); }}
           onClose={() => setDetailCard(null)}
           onAddToCollection={() => { setAddingCard(detailCard); setDetailCard(null); }}
@@ -4335,22 +4378,31 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
 
           {recentSales.length > 0 && (
             <>
-              <div className="op-section-title"><Receipt size={15} /> Recent sales for this card</div>
+              <div className="op-section-title">
+                <Receipt size={15} /> Recent sales for this card
+                <span className="op-section-sub">({recentSales.length} shown · all variants)</span>
+              </div>
               <div className="op-drawer-sales">
-                {recentSales.map(s => (
-                  <div key={s.id} className="op-drawer-sale-row">
-                    <div className="op-drawer-sale-meta">
-                      <span className="op-tag op-tag-grade">
-                        {s.grading_company || 'Raw'}{s.grade != null ? ` ${s.grade}` : ''}{s.bgs_black ? ' BLK' : ''}
-                      </span>
-                      <span className="op-tag op-tag-market">{s.marketplace}</span>
+                {recentSales.map(s => {
+                  const variant = variantSuffixOf(s.card_id);
+                  return (
+                    <div key={s.id} className="op-drawer-sale-row">
+                      <div className="op-drawer-sale-meta">
+                        <span className="op-tag op-tag-variant">{variant || 'base'}</span>
+                        {s.grading_company && (
+                          <span className="op-tag op-tag-grade">
+                            {s.grading_company} {s.grade}{s.bgs_black ? ' BLK' : ''}
+                          </span>
+                        )}
+                        <span className="op-tag op-tag-market">{s.marketplace}</span>
+                      </div>
+                      <div className="op-drawer-sale-side">
+                        <div className="op-drawer-sale-price">${Number(s.sale_price).toFixed(2)}</div>
+                        <div className="op-drawer-sale-date">{s.sale_date}</div>
+                      </div>
                     </div>
-                    <div className="op-drawer-sale-side">
-                      <div className="op-drawer-sale-price">${Number(s.sale_price).toFixed(2)}</div>
-                      <div className="op-drawer-sale-date">{s.sale_date}</div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}

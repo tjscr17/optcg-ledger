@@ -1231,6 +1231,16 @@ body { background: var(--paper); }
 }
 .op-tag-grade { color: var(--gold); border-color: var(--gold-soft); background: rgba(196, 145, 47, 0.08); }
 .op-tag-market { color: var(--navy); border-color: rgba(31, 45, 61, 0.25); background: rgba(31, 45, 61, 0.05); }
+.op-tag-variant { color: var(--jade); border-color: rgba(61, 122, 74, 0.3); background: rgba(61, 122, 74, 0.06); }
+
+.op-section-sub {
+  font-size: 11px;
+  color: var(--ink-soft);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 6px;
+}
 
 .op-empty-state {
   text-align: center;
