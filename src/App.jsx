@@ -69,9 +69,14 @@ function displayIdOf(canonicalCardId) {
 // card_id, or return null for a base printing. Used to label each sale in
 // the drawer's recent-sales panel so the user can tell parallel from base
 // at a glance.
+//
+// IMPORTANT: legacy entries from before the catalog-source switch use the
+// double-underscore form `__pre-errata`. We rewrite it to `-pre-errata`
+// FIRST so the suffix extractor sees a normal variant tag instead of
+// stripping the entire indicator and returning null.
 function variantSuffixOf(canonicalCardId) {
   if (!canonicalCardId) return null;
-  let s = String(canonicalCardId).replace(/__pre-errata$/, '');
+  let s = String(canonicalCardId).replace(/__pre-errata$/, '-pre-errata');
   const colonIdx = s.indexOf(':');
   if (colonIdx > -1) s = s.slice(colonIdx + 1);
   const m = s.match(/^[A-Z]{2,4}\d{2}-[A-Z]?\d{2,3}[A-Z]?-(.+)$/i);

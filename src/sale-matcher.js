@@ -33,10 +33,14 @@ const CARD_ID_RE = /\b(?:OP|EB|ST|PRB)\d{2}-[A-Z]?\d{2,3}[A-Z]?\b/gi;
 //   OP01-016                       → OP01-016
 //   OP01-016-parallel              → OP01-016
 //   OP14RE:OP14-118                → OP14-118
-//   OP01-016__pre-errata           → OP01-016
+//   OP01-016__pre-errata           → OP01-016 (legacy double-underscore)
+//   OP01-016-pre-errata            → OP01-016 (current single-hyphen)
 function displayIdOf(canonicalCardId) {
   if (!canonicalCardId) return null;
-  let s = String(canonicalCardId).replace(/__pre-errata$/, '');
+  // Normalize legacy `__pre-errata` to current `-pre-errata` first so the
+  // displayId extractor and any caller comparing variants line up across
+  // forms.
+  let s = String(canonicalCardId).replace(/__pre-errata$/, '-pre-errata');
   const colonIdx = s.indexOf(':');
   if (colonIdx > -1) s = s.slice(colonIdx + 1);
   const m = s.match(/^([A-Z]{2,4}\d{2}-[A-Z]?\d{2,3}[A-Z]?)/i);
@@ -141,7 +145,13 @@ export function matchSaleToCard(title, sourceCardId = null) {
 
   if (ids.length === 1) {
     const displayId = ids[0];
-    const attributeKeys = detectPrintingAttributesFromTitle(title);
+    let attributeKeys = detectPrintingAttributesFromTitle(title);
+    // Pre-errata wins over other tags — mirrors catalog.js canonicalIdOf,
+    // where the pre-errata twin is mutually exclusive with parallel/manga
+    // tags. A title saying "Pre-Errata Parallel" is bucketed as
+    // pre-errata, not parallel-pre-errata (which the catalog wouldn't
+    // have).
+    if (attributeKeys.includes('pre-errata')) attributeKeys = ['pre-errata'];
     return {
       canonicalId: joinCanonicalId(displayId, attributeKeys),
       displayId,

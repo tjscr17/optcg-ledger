@@ -92,6 +92,21 @@ const BUILTINS = [
     saleValue: '\\bChampionship\\b',
     builtin: true,
   },
+  // Pre-errata is user-toggled per card via togglePreErrata (catalog.js)
+  // — TCGPlayer doesn't sell pre-errata as a labeled product. The value
+  // pattern stays unreachable (TCGPlayer never uses (Pre-Errata)) so the
+  // catalog auto-detector doesn't fire; the saleValue catches "Pre-Errata"
+  // in eBay titles so sale matching works. Catalog canonical for the twin
+  // is `<displayId>-pre-errata` (matches matcher output) — see catalog.js
+  // line ~89 (canonicalIdOf with variantTag).
+  {
+    key: 'pre-errata',
+    label: 'Pre-Errata',
+    mode: 'regex',
+    value: '\\(Pre[- ]Errata\\)',
+    saleValue: '\\bPre[- ]Errata\\b',
+    builtin: true,
+  },
 ];
 
 // Compile an entry's pattern into a case-insensitive RegExp. Text-mode values
