@@ -1,5 +1,4 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
-// (useCallback used by refreshGradedPrices below)
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
@@ -24,7 +23,7 @@ import {
   onPrintingAttributesChanged,
 } from './printing-attributes.js';
 import {
-  applyAttributeOverride, effectiveAttributesOf, addAttributeToCard,
+  effectiveAttributesOf, addAttributeToCard,
   removeAttributeFromCard, getCardAttributeOverride,
   onCardAttributeOverridesChanged,
 } from './card-attribute-overrides.js';
@@ -232,8 +231,9 @@ export default function App() {
   // create ~10 duplicate Main Collections in one minute.
   const didAutoSeedRef = useRef(false);
 
-  // Bumps whenever the alias store changes — used by useMemo deps that
-  // depend on alias data (e.g. the drawer's recent-sales relabeler).
+  // Bumps whenever the alias store changes — read by the matchedSales
+  // useMemo so downstream consumers (drawer recent-sales, SalesView,
+  // estimator) all re-classify off the new ruleset.
   const [aliasRev, setAliasRev] = useState(0);
   useEffect(() => onCardAliasesChanged(() => setAliasRev(r => r + 1)), []);
 
@@ -826,8 +826,6 @@ export default function App() {
           <SalesView
             sales={matchedSales}
             catalogIndex={catalogIndex}
-            variantRev={variantRev}
-            aliasRev={aliasRev}
             onAddSale={() => setLogSaleFor({})}
             onEditSale={(s) => setLogSaleFor({ existing: s })}
             onRemoveSale={removeSale}
@@ -1251,7 +1249,7 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
             <span>Last graded refresh</span>
             <strong>
               ✓ {gradedRefresh.updated} updated
-              {gradedRefresh.noData > 0 && ` · ${gradedRefresh.noData} with no PSA APR data`}
+              {gradedRefresh.noData > 0 && ` · ${gradedRefresh.noData} with no matching sales`}
               {gradedRefresh.error > 0 && ` · ${gradedRefresh.error} failed (see console)`}
             </strong>
           </div>
@@ -4093,12 +4091,11 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
       bgs_black: Boolean(isGraded && gradingCompany === 'BGS' && Number(grade) === 10 && bgsBlack),
       cert_number: isGraded ? certNumber.trim() : '',
       graded_price: isGraded ? (Number(gradedPrice) || 0) : 0,
-      // PriceCharting-specific columns retained on the entry (pc_product_id,
-      // pc_product_name, price_source, price_fetched_at) are no longer
-      // written from this modal — Stage 4 parks the auto-refresh flow.
-      // Existing values on `entry` are preserved untouched by leaving them
-      // out of the patch (shared Supabase keeps the prior value; solo
-      // localStorage merges patch into the existing row).
+      // Legacy PriceCharting columns (pc_product_id, pc_product_name,
+      // price_source, price_fetched_at) are intentionally omitted from
+      // this patch so existing values on the row stay untouched (shared
+      // Supabase keeps the prior value; solo localStorage merges patch
+      // into the existing row).
     };
     if (editing) payload.id = entry.id;
     await onSave(payload);
@@ -4648,8 +4645,10 @@ function PriceCell({ label, value, tone, accent }) {
 // graded-pricing estimator. Filterable by card / grading company / grade /
 // marketplace / date range, and editable per-row. Adding a sale opens
 // LogSaleModal; editing one re-opens it with the existing row's data.
-function SalesView({ sales, catalogIndex, variantRev = 0, aliasRev = 0, onAddSale, onEditSale, onRemoveSale, onCardClick, onReclassifyAll, reclassifyState }) {
-  void variantRev; void aliasRev; // catalog / alias changes → re-render
+function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, onCardClick, onReclassifyAll, reclassifyState }) {
+  // `sales` is already pre-matched at the App level (matchedSales) — the
+  // _effectiveCardId / _effectiveDisplayId fields reflect the current alias
+  // + variant ruleset, so no rev props are needed for re-render hints.
   const [filterCard, setFilterCard] = useStoredState('op:sales:filter:q', '');
   const [filterCompany, setFilterCompany] = useStoredState('op:sales:filter:company', 'all');
   const [filterGrade, setFilterGrade] = useStoredState('op:sales:filter:grade', 'all');

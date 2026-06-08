@@ -1,24 +1,24 @@
 // ============================================================================
 // Sale-to-card matcher — given a listing title, figure out which canonical
-// card it's most likely referring to. Used in two places:
-//   1. CardDetailDrawer's recent-sales panel: shows each sale with the
-//      correctly-detected variant label, regardless of what the scraper
-//      stored at scrape time.
-//   2. estimateGradedPrice: filters candidate sales to only those whose
-//      title points at the same canonical id as the entry being priced.
+// card it's most likely referring to. Called from App.jsx's matchedSales
+// useMemo (so the drawer's recent-sales panel, SalesView, estimateGradedPrice,
+// and reclassifyAllSales all consume one pre-computed result set).
 //
-// Three signals, applied in order:
-//   1. Card-ID regex — `OP01-016`, `EB02-061`, `OP01-SP01`, etc. The first
-//      hit determines the displayId; further hits make the title a bundle
-//      and we drop the sale entirely.
-//   2. Card aliases — user-registered nicknames tied to specific canonical
-//      ids (`"Dodgers Luffy"` → `EB02-010-dodgers`). The longest matching
-//      alias wins. Aliases override card-ID regex when both fire — users
-//      add an alias because the regex isn't picking the right card.
-//   3. Variant detection — runs every printing-attribute's saleValue regex
-//      against the title to identify which variants apply, then combines
-//      with the displayId to produce the canonical id with the sorted
-//      attribute suffix (matching the catalog's canonicalIdOf convention).
+// Signals, applied in order:
+//   1. Card aliases — user-registered nicknames tied to specific canonical
+//      ids (e.g. `"Dodgers Luffy"` → `EB02-010-dodgers`). Word-based: the
+//      alias matches a title when every word in the alias is present as a
+//      token (any order). Tiebreaker: alias with more total word-character
+//      length wins. Aliases override card-ID regex when both fire because
+//      users add aliases precisely to correct card-ID misidentification.
+//   2. Card-ID regex — `OP01-016`, `EB02-061`, `OP01-SP01`, etc. The first
+//      hit determines the displayId; 2+ distinct hits → bundle → drop.
+//   3. Variant detection — every printing-attribute's saleValue regex against
+//      the title, combined with the displayId into the catalog's canonicalId
+//      convention (sorted attribute suffix).
+//   4. Catalog-name disambiguation — when 1 + 2 leave us at base but the
+//      catalog has multiple variant printings for that displayId, score
+//      each variant's fullName tokens against the title and pick the best.
 //
 // Returns null when nothing identifies the card.
 // ============================================================================

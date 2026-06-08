@@ -7,8 +7,8 @@
 // match scoring, mismatch diagnosis, UI pills — iterates the effective list
 // so adding a new facet is a one-line entry, no other code touched.
 //
-// Patterns run against OPTCGAPI `card_name` AND TCGPlayer product `name`
-// (the conventions overlap closely so the same regex applies to both).
+// Patterns run against TCGPlayer product `name` (the only catalog source
+// post-2026-06-01 — OPTCGAPI was retired).
 // ============================================================================
 
 const STORAGE_KEY = 'optcg:variants:v1';
@@ -17,9 +17,9 @@ const STORAGE_KEY = 'optcg:variants:v1';
 // entries; users can add/remove their own alongside.
 //
 // Two regexes per attribute:
-//   value     — matches TCGPlayer product `name` (and OPTCGAPI card_name).
-//               TCGPlayer is consistent with parenthesized labels like
-//               "(Manga Rare)", so the catalog patterns lean on the parens.
+//   value     — matches TCGPlayer product `name`. TCGPlayer is consistent
+//               with parenthesized labels like "(Manga Rare)", so the
+//               catalog patterns lean on the parens.
 //   saleValue — matches free-text eBay / 130point listing titles, where
 //               sellers write "Manga Parallel" / "Dodgers Luffy" without
 //               parens. Falls back to `value` if unset.

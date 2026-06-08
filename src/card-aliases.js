@@ -4,10 +4,11 @@
 // card-ID (e.g. "LA Dodgers Luffy 2025 Promo PSA 10" with no `OPnn-XXX`).
 //
 // Each alias is a free-text phrase tied to a specific canonical card_id. The
-// matcher scans listing titles for any alias substring (case-insensitive) and
-// uses the longest match as the card identifier — longer phrases are
-// specific, short phrases are dangerous (an alias like "Luffy" would match
-// every Luffy listing in your dataset).
+// matcher tokenizes both the alias and the title; an alias matches when every
+// word in the alias appears in the title (any order). Tiebreaker among
+// matching aliases is total word-character length, so more specific phrases
+// win. Single-word aliases must be ≥6 chars to fire — a generic "Luffy"
+// alias would otherwise match every Luffy listing in your dataset.
 //
 // Solo mode: localStorage keyed by `optcg:card-aliases:v1`, shape:
 //   { [card_id]: string[] }

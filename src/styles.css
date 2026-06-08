@@ -436,8 +436,6 @@ body { background: var(--paper); }
 .op-card-tile-id { font-family: var(--mono); font-size: 9px; font-weight: 600; color: var(--ink-soft); margin-bottom: 2px; }
 .op-card-tile-name { font-family: var(--display); font-weight: 600; font-size: 13px; line-height: 1.15; margin-bottom: 2px; }
 .op-card-tile-price { display: flex; align-items: baseline; gap: 5px; margin-top: auto; padding-top: 6px; }
-.op-card-tile-price-tier { margin-top: 2px; padding-top: 0; border-top: 1px dashed var(--line); padding-top: 4px; }
-.op-card-tile-price-tier .op-card-tile-price-val { color: var(--gold); }
 .op-card-tile-price-label {
   font-family: var(--mono); font-size: 8px; font-weight: 500;
   text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-soft);
@@ -696,8 +694,6 @@ body { background: var(--paper); }
 .op-graded-toggle input[type="checkbox"] {
   accent-color: var(--gold); width: 14px; height: 14px; cursor: pointer;
 }
-.op-graded-price-row { display: flex; gap: 8px; align-items: stretch; }
-.op-graded-price-row input { flex: 1; }
 .op-variant-row { display: flex; gap: 8px; align-items: stretch; }
 .op-variant-row select { flex: 1; font-family: var(--mono); font-size: 12px; }
 .op-graded-meta {

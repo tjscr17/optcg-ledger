@@ -60,8 +60,8 @@ async function insertSale(s, sale) {
 //   OP14RE:OP14-118                → OP14-118    (drops source-set prefix)
 //   OP14RE:OP14-118-parallel       → OP14-118
 //   OP01-016__pre-errata           → OP01-016    (legacy pre-2026-06-01 syntax)
-// Positively matches the displayId at the start, so variant suffixes never
-// confuse the extraction (unlike the buggy v0.1 greedy strip).
+// Positively anchors at the start of the string so variant suffixes never
+// influence the match.
 function extractDisplayId(canonicalCardId) {
   if (!canonicalCardId) return null;
   let s = String(canonicalCardId).replace(/__pre-errata$/, '');
@@ -118,21 +118,15 @@ async function fetchAndParseInTab(tabId, path) {
 }
 
 function toSalesRow(s, parsed, queryCardId) {
-  // Loosened post-v0.2: we accept any result with a usable date + USD price.
-  // The display-time matcher (webapp's sale-matcher.js) handles
-  // classification using current aliases + variant rules, so over-strict
-  // rejection at scrape time only drops data the user might later want.
+  // Accept any scrape result with a usable date + USD price. The display-time
+  // matcher (webapp's sale-matcher.js) handles classification using current
+  // aliases + variant rules, so over-strict rejection here only drops data
+  // the user might later want.
   //
-  // Skip rules (keep these — they prevent garbage):
-  //   - bundles (multiple distinct card-IDs)
+  // Skip rules (keep — they prevent real garbage):
+  //   - bundles (multiple distinct card-IDs in title)
   //   - non-USD
   //   - missing sale date
-  //
-  // Skip rule REMOVED:
-  //   - primary_card_id !== queryCardId
-  //     (titles often list the queried card alongside others, or the seller
-  //     describes the card without leading with its ID. The matcher can
-  //     still place these correctly via aliases or variant keywords.)
   if (parsed.card_ids.length > 1) return null;
   if (parsed.currency !== 'USD') return null;
   if (!parsed.sale_date) return null;
