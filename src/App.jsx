@@ -4384,12 +4384,12 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
 
           <div className="op-section-title">
             <Receipt size={15} /> Aliases
-            <span className="op-section-sub">(nicknames used to match this card in listing titles)</span>
+            <span className="op-section-sub">(any listing containing all these words — any order — matches this card)</span>
           </div>
           <div className="op-alias-edit">
             <div className="op-alias-pills">
               {aliases.length === 0 ? (
-                <span className="op-resolve-side-sub">No aliases yet — add a nickname like "Dodgers Luffy" or "Gear 5" if sellers describe this card without using its card-ID.</span>
+                <span className="op-resolve-side-sub">No aliases yet — add a nickname like "Dodgers Luffy" or "Gear 5 Luffy" if sellers describe this card without using its card-ID. Word order doesn't matter; the title just needs all the words in the alias.</span>
               ) : aliases.map(a => (
                 <span key={a} className="op-alias-pill">
                   {a}
@@ -4406,7 +4406,7 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                 <input
                   className="op-input"
                   autoFocus
-                  placeholder="e.g. Dodgers Luffy, LA Luffy, Gear 5"
+                  placeholder="e.g. Dodgers Luffy, Gear 5 Luffy, Strawhat Pirates"
                   value={aliasInput}
                   onChange={(e) => { setAliasInput(e.target.value); setAliasError(''); }}
                   onKeyDown={(e) => {

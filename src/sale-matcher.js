@@ -57,19 +57,31 @@ function cardIdsFromTitle(title) {
   return ids;
 }
 
-// Find the longest registered alias substring present in the title. Returns
-// `{ alias, card_id }` or null. Longest-match-wins so a more specific
-// "LA Dodgers Luffy" beats a generic "Dodgers" when both are registered.
+// Find the best-matching alias whose words are ALL present in the title
+// (any order). Returns `{ alias, card_id }` or null. Word-based instead of
+// substring so:
+//   alias "Dodgers Luffy" matches:
+//     ✓ "Dodgers Luffy PSA 10"
+//     ✓ "LA Dodgers Luffy"
+//     ✓ "Monkey D Luffy Dodgers Promo"
+//     ✗ "Dodgers Pizza"   (missing "luffy")
+//     ✗ "Luffy Manga"     (missing "dodgers")
+// Tie-break: alias with more total word-character length wins, so a more
+// specific "LA Dodgers Luffy" (15 word-chars) beats "Dodgers Luffy" (12).
 function bestAliasMatch(title) {
   if (!title) return null;
-  const lower = title.toLowerCase();
+  const titleTokens = new Set((String(title).toLowerCase().match(/[a-z0-9]+/g) || []));
   let best = null;
   for (const { card_id, alias } of allAliases()) {
-    const a = alias.toLowerCase();
-    if (a.length < 3) continue; // safety net for stored micro-aliases
-    if (lower.includes(a)) {
-      if (!best || a.length > best.alias.length) best = { card_id, alias: a };
-    }
+    const words = String(alias).toLowerCase().match(/[a-z0-9]+/g) || [];
+    if (words.length === 0) continue;
+    // Safety net: a single-word alias must be ≥6 chars to win (avoids a
+    // generic "luffy" or "zoro" matching the entire character's listings).
+    if (words.length === 1 && words[0].length < 6) continue;
+    const allPresent = words.every(w => titleTokens.has(w));
+    if (!allPresent) continue;
+    const score = words.reduce((acc, w) => acc + w.length, 0);
+    if (!best || score > best.score) best = { card_id, alias, score };
   }
   return best;
 }
