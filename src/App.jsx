@@ -27,6 +27,7 @@ import {
   removeAttributeFromCard, getCardAttributeOverride,
   onCardAttributeOverridesChanged,
 } from './card-attribute-overrides.js';
+import { fieldsToGradeCode, gradeCodeToFields, ensureGrade } from './grades.js';
 
 // Effective attribute keys for a card / product / resolution snapshot.
 // For catalog cards (with `canonicalId`), per-card manual overrides apply on
@@ -166,12 +167,140 @@ const CONDITIONS = ['Mint', 'Near Mint', 'Lightly Played', 'Moderately Played', 
 const GRADING_COMPANIES = ['PSA', 'BGS', 'CGC', 'SGC'];
 const GRADES_BY_COMPANY = {
   PSA: [10, 9.5, 9, 8, 7],
-  BGS: [10, 9.5, 9, 8, 7],
+  BGS: ['BL', 10, 9.5, 9, 8, 7], // 'BL' = Beckett Black Label (no separate flag)
   CGC: [10, 9.5, 9, 8, 7],
   SGC: [10, 9.5, 9, 8, 7],
 };
+// Beckett Black Label is modeled as grade === 'BL'.
+const isBlackLabel = (grade) => String(grade).trim().toUpperCase() === 'BL';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+// ============================================================================
+// Normalized-schema <-> in-memory reshaping. The DB uses the normalized schema
+// (collected_cards / contributions / transactions / transaction_contributions /
+// sales with grade_code + card_code + listing_site, card_nicknames). The rest
+// of App.jsx keeps working with the legacy in-memory object shape
+// (entry.card_id / purchase_price / contributions[] / grading_company+grade,
+// tx.entry_id, sale.marketplace). These functions translate at the data-access
+// boundary so views + the equity engine don't need to change.
+// ============================================================================
+
+// Group child contribution rows ({member_name, amount}) by their parent id.
+const groupContribs = (rows, key) => {
+  const m = new Map();
+  for (const r of rows || []) {
+    const k = r[key];
+    if (!k) continue;
+    let arr = m.get(k);
+    if (!arr) { arr = []; m.set(k, arr); }
+    arr.push({ name: r.member_name, amount: Number(r.amount) });
+  }
+  return m;
+};
+
+// collected_cards row -> in-memory `entry`
+const entryFromRow = (r, contribsByCard) => {
+  const { grading_company, grade } = gradeCodeToFields(r.grade_code);
+  return {
+    id: r.id,
+    collection_id: r.collection_id,
+    card_id: r.card_code,
+    condition: r.condition,
+    purchase_price: r.price_paid,
+    owner_name: r.owner_name,
+    contributions: contribsByCard.get(r.id) || [],
+    notes: r.acquisition_notes,
+    added_at: r.added_at,
+    acquired_at: r.date_acquired,
+    grading_company,
+    grade,
+    cert_number: r.cert_number,
+    graded_price: r.graded_price,
+    grade_description: r.grade_description,
+    psa_spec_id: r.psa_spec_id,
+    graded_price_source: r.graded_price_source,
+    graded_price_fetched_at: r.graded_price_fetched_at,
+    date_sold: r.date_sold,
+    sold_price: r.sold_price,
+  };
+};
+
+// in-memory `entry` -> collected_cards columns (contributions handled separately)
+const entryToRow = (e) => ({
+  collection_id: e.collection_id ?? null,
+  card_code: e.card_id ?? null,
+  condition: e.condition ?? null,
+  price_paid: Number(e.purchase_price) || 0,
+  owner_name: e.owner_name ?? null,
+  acquisition_notes: e.notes ?? null,
+  date_acquired: e.acquired_at ?? null,
+  grade_code: fieldsToGradeCode(e.grading_company, e.grade),
+  cert_number: e.cert_number ?? null,
+  graded_price: e.graded_price ?? null,
+  grade_description: e.grade_description ?? null,
+  psa_spec_id: e.psa_spec_id ?? null,
+  graded_price_source: e.graded_price_source ?? null,
+  graded_price_fetched_at: e.graded_price_fetched_at ?? null,
+});
+
+// transactions row -> in-memory `tx`
+const txFromRow = (r, contribsByTx) => ({
+  id: r.id,
+  collection_id: r.collection_id,
+  card_id: r.card_code,
+  card_display_name: r.card_display_name,
+  entry_id: r.collected_card_id,
+  type: r.type,
+  amount: r.amount,
+  contributions: contribsByTx.get(r.id) || [],
+  occurred_at: r.occurred_at,
+  notes: r.notes,
+  created_at: r.created_at,
+});
+
+// in-memory `tx` -> transactions columns (contributions handled separately)
+const txToRow = (t) => ({
+  id: t.id,
+  collection_id: t.collection_id ?? null,
+  card_code: t.card_id ?? null,
+  collected_card_id: t.entry_id ?? null,
+  card_display_name: t.card_display_name ?? null,
+  type: t.type,
+  amount: Number(t.amount) || 0,
+  occurred_at: t.occurred_at ?? null,
+  notes: t.notes ?? null,
+  created_at: t.created_at,
+});
+
+// sales row -> in-memory `sale`
+const saleFromRow = (r) => {
+  const { grading_company, grade } = gradeCodeToFields(r.grade_code);
+  return {
+    ...r,
+    card_id: r.card_code,
+    grading_company,
+    grade,
+    marketplace: r.listing_site,
+    notes: r.description,
+  };
+};
+
+// in-memory `sale` -> sales columns
+const saleToRow = (s) => {
+  const row = { ...s };
+  row.card_code = s.card_id ?? s.card_code ?? null;
+  row.grade_code = fieldsToGradeCode(s.grading_company, s.grade);
+  row.listing_site = s.marketplace ?? s.listing_site ?? 'unknown';
+  row.description = s.notes ?? s.description ?? null;
+  // empty listing_url would collide on the unique(source, listing_url) index
+  row.listing_url = s.listing_url || null;
+  // drop in-memory-only fields that aren't sales columns
+  delete row.card_id; delete row.grading_company; delete row.grade;
+  delete row.bgs_black; delete row.marketplace; delete row.notes;
+  delete row._effectiveCardId; delete row._effectiveDisplayId;
+  return row;
+};
 
 // ============================================================================
 export default function App() {
@@ -230,6 +359,9 @@ export default function App() {
   // 100+ sales rows in quick succession, that path ran enough times to
   // create ~10 duplicate Main Collections in one minute.
   const didAutoSeedRef = useRef(false);
+  // Cards/sets the session has already ensured exist in the global catalog
+  // tables, so we don't re-attempt the (conflict-logging) upsert each time.
+  const ensuredCardsRef = useRef(new Set());
 
   // Bumps whenever the alias store changes — read by the matchedSales
   // useMemo so downstream consumers (drawer recent-sales, SalesView,
@@ -238,36 +370,41 @@ export default function App() {
   useEffect(() => onCardAliasesChanged(() => setAliasRev(r => r + 1)), []);
 
   const refreshData = useCallback(async () => {
-    const [cols, ents, txs, watches, salesRows, aliasRows] = await Promise.all([
+    const [cols, ccRows, contribRows, txRows, txContribRows, salesRows, nickRows] = await Promise.all([
       store.list('collections'),
-      store.list('entries'),
+      store.list('collected_cards').catch(() => []),
+      store.list('contributions').catch(() => []),
       store.list('transactions').catch(() => []),
-      store.list('watchlist').catch(() => []),
+      store.list('transaction_contributions').catch(() => []),
       store.list('sales').catch(() => []),
-      store.list('card_aliases').catch(() => []),
+      store.list('card_nicknames').catch(() => []),
     ]);
-    hydrateAliasesFromShared(aliasRows);
+    hydrateAliasesFromShared(nickRows.map(r => ({ card_id: r.card_code, alias: r.nickname })));
+    const contribsByCard = groupContribs(contribRows, 'collected_card_id');
+    const contribsByTx = groupContribs(txContribRows, 'transaction_id');
+    // Owned collection = unsold cards. Sold cards are retained in the DB
+    // (date_sold/sold_price) but hidden from the collection view.
+    const ents = ccRows.filter(r => r.date_sold == null).map(r => entryFromRow(r, contribsByCard));
+    const txs = txRows.map(r => txFromRow(r, contribsByTx));
+    const salesMapped = salesRows.map(saleFromRow);
     let cs = cols;
     // Auto-seed only when (a) collections AND every other data table are
     // empty (so we know the vault is genuinely fresh, not just suffering a
     // transient query blip), AND (b) we haven't already attempted a seed
-    // this session. Either condition alone is unsafe: an empty cols result
-    // by itself can be a network hiccup mid-sync, and the ref alone doesn't
-    // protect against the first call returning empty on race.
+    // this session.
     const vaultLooksGenuinelyEmpty =
-      cs.length === 0 && ents.length === 0 && txs.length === 0 && watches.length === 0 && salesRows.length === 0;
+      cs.length === 0 && ccRows.length === 0 && txRows.length === 0 && salesRows.length === 0;
     if (vaultLooksGenuinelyEmpty && !didAutoSeedRef.current) {
       didAutoSeedRef.current = true;
       const seed = await store.insert('collections', { id: uid(), name: 'Main Collection', created_at: new Date().toISOString() });
       cs = [seed].filter(Boolean);
-    } else if (cs.length > 0 || ents.length > 0 || txs.length > 0) {
+    } else if (cs.length > 0 || ccRows.length > 0 || txRows.length > 0) {
       didAutoSeedRef.current = true;
     }
     setCollections(cs);
     setEntries(ents);
     setTransactions(txs);
-    setWatchlist(watches);
-    setSales(salesRows);
+    setSales(salesMapped);
     setActiveCollectionId(prev => prev || cs[0]?.id || null);
   }, []);
 
@@ -297,12 +434,13 @@ export default function App() {
     })();
     // Realtime sync (shared mode only)
     const unsubC = store.subscribe('collections', refreshData);
-    const unsubE = store.subscribe('entries', refreshData);
+    const unsubE = store.subscribe('collected_cards', refreshData);
+    const unsubEC = store.subscribe('contributions', refreshData);
     const unsubT = store.subscribe('transactions', refreshData);
-    const unsubW = store.subscribe('watchlist', refreshData);
+    const unsubTC = store.subscribe('transaction_contributions', refreshData);
     const unsubS = store.subscribe('sales', refreshData);
-    const unsubA = store.subscribe('card_aliases', refreshData);
-    return () => { unsubC(); unsubE(); unsubT(); unsubW(); unsubS(); unsubA(); };
+    const unsubA = store.subscribe('card_nicknames', refreshData);
+    return () => { unsubC(); unsubE(); unsubEC(); unsubT(); unsubTC(); unsubS(); unsubA(); };
   }, [refreshData]);
 
   // erratTick bumps whenever the user toggles a pre-errata mark so the
@@ -392,20 +530,76 @@ export default function App() {
     if (collections.length <= 1) return;
     if (!confirm('Delete this collection and all its entries? This cannot be undone.')) return;
     await store.remove('collections', id);
-    await store.removeWhere('entries', (e) => e.collection_id === id);
+    await store.removeWhere('collected_cards', (e) => e.collection_id === id);
     setCollections(collections.filter(c => c.id !== id));
     setEntries(entries.filter(e => e.collection_id !== id));
     if (activeCollectionId === id) setActiveCollectionId(collections.find(c => c.id !== id)?.id || null);
   };
 
-  // Helper: append a transaction row. card lookup is best-effort so the log
-  // remains useful even if the catalog entry later gets removed/renamed.
-  // `entry_id` links buy/sell txs back to the entry so cross-collection
-  // moves can carry the buy's capital allocation along with the card.
+  // Ensure a catalog card has a row in the global `cards` table (+ its `set`),
+  // so FKs from collected_cards / sales / transactions / card_nicknames
+  // resolve. The catalog is built client-side and is far larger than the
+  // sparse DB `cards` table, so any card the user newly references must be
+  // materialized first. Best-effort + deduped per session.
+  const ensureCard = useCallback(async (card) => {
+    if (!card) return null;
+    const code = card.canonicalId || card.id;
+    if (!code || ensuredCardsRef.current.has(code)) return code;
+    ensuredCardsRef.current.add(code);
+    const serial = card.displayId || displayIdOf(code) || code;
+    const setCode = String(code).includes(':')
+      ? String(code).split(':')[0]
+      : (String(serial).includes('-') ? String(serial).split('-')[0] : String(serial));
+    const attribute_tag = variantSuffixOf(code) || '';
+    try { await store.insert('sets', { set_code: setCode, tcg_code: 'OP' }); } catch {}
+    try {
+      await store.insert('cards', {
+        card_code: code,
+        set_code: setCode,
+        serial,
+        name: card.name ?? null,
+        full_name: card.fullName ?? card.name ?? null,
+        image_url: card.imageUrl ?? null,
+        rarity: card.rarity ?? null,
+        attribute_tag,
+        external_id: card.tcg_id != null ? String(card.tcg_id) : null,
+        source: 'app',
+      });
+    } catch {}
+    return code;
+  }, []);
+
+  // Centralized transaction insert: writes the parent `transactions` row then
+  // its `transaction_contributions` child rows, and returns the in-memory tx
+  // (legacy shape with a contributions[] array) for local state. card_code is
+  // nulled when it isn't a known catalog id so the FK never fails (the
+  // collected_card_id link is what matters for card-scoped rows).
+  const commitTransaction = useCallback(async (tx) => {
+    const row = txToRow({ ...tx, id: tx.id || uid(), created_at: tx.created_at || new Date().toISOString() });
+    if (row.card_code && !catalogIndex.has(row.card_code)) row.card_code = null;
+    const created = await store.insert('transactions', row);
+    if (!created) return null;
+    const saved = [];
+    for (const c of (tx.contributions || [])) {
+      const name = c?.name && String(c.name).trim();
+      if (!name) continue;
+      const ins = await store.insert('transaction_contributions', {
+        id: uid(), transaction_id: created.id, member_name: name, amount: Number(c.amount) || 0,
+      });
+      if (ins) saved.push({ name, amount: Number(c.amount) || 0 });
+    }
+    const inMem = txFromRow(created, new Map());
+    inMem.contributions = saved;
+    setTransactions(prev => [...prev, inMem]);
+    return inMem;
+  }, [catalogIndex]);
+
+  // Helper: append a buy/sell transaction for an entry. `entry_id` links the
+  // tx back to the collected card so cross-collection moves carry the buy's
+  // capital allocation along with the card.
   const logTransaction = async ({ type, entry, sale }) => {
     const card = catalogIndex.get(entry.card_id);
-    const tx = {
-      id: uid(),
+    return commitTransaction({
       collection_id: entry.collection_id,
       card_id: entry.card_id,
       card_display_name: card ? `${card.displayId || card.id} ${card.name}` : entry.card_id,
@@ -417,10 +611,7 @@ export default function App() {
         : (entry.contributions || []),
       occurred_at: type === 'sell' ? (sale?.date || null) : (entry.acquired_at || null),
       notes: type === 'sell' ? (sale?.notes || '') : (entry.notes || ''),
-      created_at: new Date().toISOString(),
-    };
-    const created = await store.insert('transactions', tx);
-    if (created) setTransactions(prev => [...prev, created]);
+    });
   };
 
   // -----------------------------------------------------------------------
@@ -430,14 +621,16 @@ export default function App() {
   // the user's own portfolio sells live in `transactions(type='sell')`.
   // -----------------------------------------------------------------------
   const addSale = async (sale) => {
+    if (sale.card_id) await ensureCard(catalogIndex.get(sale.card_id) || { canonicalId: sale.card_id });
+    if (sale.grading_company && sale.grade != null) await ensureGrade(sale.grading_company, sale.grade);
     const created = await store.insert('sales', {
-      ...sale,
+      ...saleToRow(sale),
       id: uid(),
       created_at: new Date().toISOString(),
       source: sale.source || 'manual',
     });
     if (created) {
-      setSales(prev => [...prev, created]);
+      setSales(prev => [...prev, saleFromRow(created)]);
     } else {
       const err = getLastStoreError();
       const detail = err
@@ -449,9 +642,11 @@ export default function App() {
   };
 
   const updateSale = async (id, patch) => {
-    const updated = await store.update('sales', id, patch);
-    if (updated) setSales(prev => prev.map(s => s.id === id ? updated : s));
-    return updated;
+    if (patch.card_id) await ensureCard(catalogIndex.get(patch.card_id) || { canonicalId: patch.card_id });
+    if (patch.grading_company && patch.grade != null) await ensureGrade(patch.grading_company, patch.grade);
+    const updated = await store.update('sales', id, saleToRow(patch));
+    if (updated) setSales(prev => prev.map(s => s.id === id ? saleFromRow(updated) : s));
+    return updated ? saleFromRow(updated) : null;
   };
 
   const removeSale = async (id) => {
@@ -479,7 +674,8 @@ export default function App() {
         const m = matchSaleToCard(s.listing_title || '', s.card_id, catalogByDisplayId);
         const newId = m.canonicalId || s.card_id;
         if (newId !== s.card_id) {
-          await store.update('sales', s.id, { card_id: newId });
+          await ensureCard(catalogIndex.get(newId) || { canonicalId: newId });
+          await store.update('sales', s.id, { card_code: newId });
           setSales(prev => prev.map(row => row.id === s.id ? { ...row, card_id: newId } : row));
           updated++;
         } else {
@@ -498,14 +694,14 @@ export default function App() {
   // on the full canonical id — pricing only uses sales of the EXACT variant
   // being priced (so a Dodgers Luffy entry doesn't get averaged with base
   // Luffy sales).
-  const estimateGradedPrice = (cardId, gradingCompany, grade, { days = 180, bgsBlack = null } = {}) => {
+  const estimateGradedPrice = (cardId, gradingCompany, grade, { days = 180 } = {}) => {
     if (!cardId || !gradingCompany || grade == null) return null;
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const company = String(gradingCompany).toUpperCase();
     const matches = matchedSales.filter(s => {
       if ((s.grading_company || '').toUpperCase() !== company) return false;
-      if (Number(s.grade) !== Number(grade)) return false;
-      if (bgsBlack !== null && Boolean(s.bgs_black) !== Boolean(bgsBlack)) return false;
+      // String-aware so Black Label ('BL') matches 'BL' and 10 matches 10.
+      if (String(s.grade) !== String(grade)) return false;
       const t = s.sale_date ? Date.parse(s.sale_date) : 0;
       if (!Number.isFinite(t) || t < cutoff) return false;
       return s._effectiveCardId === cardId;
@@ -551,7 +747,6 @@ export default function App() {
       try {
         const est = estimateGradedPrice(entry.card_id, entry.grading_company, entry.grade, {
           days: 180,
-          bgsBlack: entry.bgs_black,
         });
         if (est) {
           const patch = {
@@ -559,7 +754,7 @@ export default function App() {
             graded_price_source: 'sales-log',
             graded_price_fetched_at: new Date().toISOString(),
           };
-          await store.update('entries', entry.id, patch);
+          await store.update('collected_cards', entry.id, patch);
           setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...patch } : e));
           updated++;
         } else {
@@ -586,14 +781,25 @@ export default function App() {
   }, [entries, sales]);
 
   const addEntry = async (entry) => {
-    const created = await store.insert('entries', {
-      ...entry,
-      id: uid(),
-      added_at: new Date().toISOString(),
-    });
+    // Materialize the catalog card + grade in the global reference tables so
+    // the collected_cards FKs resolve.
+    await ensureCard(catalogIndex.get(entry.card_id) || { canonicalId: entry.card_id });
+    if (entry.grading_company && entry.grade != null) await ensureGrade(entry.grading_company, entry.grade);
+    const created = await store.insert('collected_cards', { ...entryToRow(entry), added_at: new Date().toISOString() });
     if (created) {
-      setEntries(prev => [...prev, created]);
-      logTransaction({ type: 'buy', entry: created });
+      const savedContribs = [];
+      for (const c of (entry.contributions || [])) {
+        const name = c?.name && String(c.name).trim();
+        if (!name) continue;
+        const ins = await store.insert('contributions', {
+          id: uid(), collected_card_id: created.id, member_name: name, amount: Number(c.amount) || 0,
+        });
+        if (ins) savedContribs.push({ name, amount: Number(c.amount) || 0 });
+      }
+      const inMem = entryFromRow(created, new Map());
+      inMem.contributions = savedContribs;
+      setEntries(prev => [...prev, inMem]);
+      logTransaction({ type: 'buy', entry: inMem });
     } else {
       // shared.insert returned null — Supabase rejected the row. Surface the
       // actual error so the user knows exactly what column is missing.
@@ -601,20 +807,55 @@ export default function App() {
       const detail = err
         ? `${err.code || ''} ${err.message || ''}${err.details ? ` · ${err.details}` : ''}${err.hint ? ` · hint: ${err.hint}` : ''}`.trim()
         : '';
-      alert(`Couldn't save the entry to Supabase.${detail ? `\n\n${detail}` : ''}\n\nMost common cause: a missing column on the entries table. The migration SQL is documented at the top of src/storage.js.`);
+      alert(`Couldn't save the entry to Supabase.${detail ? `\n\n${detail}` : ''}\n\nMost common cause: a missing column on the collected_cards table.`);
     }
   };
 
   const updateEntry = async (id, patch) => {
     const before = entries.find(e => e.id === id);
-    const updated = await store.update('entries', id, patch);
+    // Map the in-memory entry patch onto collected_cards columns (only the
+    // keys present in `patch`).
+    const colMap = {
+      card_id: 'card_code', purchase_price: 'price_paid', notes: 'acquisition_notes',
+      acquired_at: 'date_acquired', condition: 'condition', owner_name: 'owner_name',
+      cert_number: 'cert_number', graded_price: 'graded_price', grade_description: 'grade_description',
+      psa_spec_id: 'psa_spec_id', graded_price_source: 'graded_price_source',
+      graded_price_fetched_at: 'graded_price_fetched_at', collection_id: 'collection_id',
+    };
+    const dbPatch = {};
+    for (const [k, v] of Object.entries(patch)) if (k in colMap) dbPatch[colMap[k]] = v;
+    if ('grading_company' in patch || 'grade' in patch) {
+      const company = 'grading_company' in patch ? patch.grading_company : before?.grading_company;
+      const grade = 'grade' in patch ? patch.grade : before?.grade;
+      if (company && grade != null) await ensureGrade(company, grade);
+      dbPatch.grade_code = fieldsToGradeCode(company, grade);
+    }
+    if ('card_id' in patch) await ensureCard(catalogIndex.get(patch.card_id) || { canonicalId: patch.card_id });
+
+    const updated = await store.update('collected_cards', id, dbPatch);
     if (!updated) return;
-    setEntries(entries.map(e => e.id === id ? updated : e));
+
+    // Replace contribution child rows if the splits changed.
+    let inMemContribs = before?.contributions || [];
+    if ('contributions' in patch) {
+      await store.removeWhere('contributions', r => r.collected_card_id === id);
+      inMemContribs = [];
+      for (const c of (patch.contributions || [])) {
+        const name = c?.name && String(c.name).trim();
+        if (!name) continue;
+        const ins = await store.insert('contributions', {
+          id: uid(), collected_card_id: id, member_name: name, amount: Number(c.amount) || 0,
+        });
+        if (ins) inMemContribs.push({ name, amount: Number(c.amount) || 0 });
+      }
+    }
+    const inMem = entryFromRow(updated, new Map());
+    inMem.contributions = inMemContribs;
+    setEntries(entries.map(e => e.id === id ? inMem : e));
 
     // If the user moved the entry to a different collection, drag its buy
     // and card-scoped expense transactions along so the capital allocation
-    // follows the card. Match by entry_id when available, otherwise fall
-    // back to card_id + occurred_at heuristic for legacy buy txs.
+    // follows the card.
     if (before && patch.collection_id && patch.collection_id !== before.collection_id) {
       const oldDate = (before.acquired_at || (before.added_at || '').slice(0, 10) || '').slice(0, 10);
       const linked = transactions.filter(t => {
@@ -627,10 +868,12 @@ export default function App() {
       });
       for (const tx of linked) {
         const patchTx = { collection_id: patch.collection_id };
-        // Backfill the entry_id link too if it was missing.
-        if (!tx.entry_id) patchTx.entry_id = id;
+        // Backfill the collected_card_id link too if it was missing.
+        if (!tx.entry_id) patchTx.collected_card_id = id;
         const updatedTx = await store.update('transactions', tx.id, patchTx);
-        if (updatedTx) setTransactions(prev => prev.map(t => t.id === tx.id ? updatedTx : t));
+        if (updatedTx) setTransactions(prev => prev.map(t => t.id === tx.id
+          ? { ...t, collection_id: patch.collection_id, entry_id: t.entry_id || id }
+          : t));
       }
     }
   };
@@ -642,7 +885,8 @@ export default function App() {
   // the normal path for actual divestments.
   const removeEntry = async (id) => {
     const before = entries.find(e => e.id === id);
-    await store.remove('entries', id);
+    // collected_cards FK cascades the contributions child rows.
+    await store.remove('collected_cards', id);
     setEntries(entries.filter(e => e.id !== id));
     if (!before) return;
     const oldDate = (before.acquired_at || (before.added_at || '').slice(0, 10) || '').slice(0, 10);
@@ -659,43 +903,26 @@ export default function App() {
     }
   };
 
-  const addToWatchlist = async (card, opts = {}) => {
-    const cid = card.canonicalId || card.id;
-    if (watchlist.some(w => w.card_id === cid)) return;
-    const created = await store.insert('watchlist', {
-      id: uid(),
-      card_id: cid,
-      card_display_name: card.name ? `${card.displayId || card.id} ${card.name}` : (card.displayId || card.id),
-      target_price: opts.target_price ?? null,
-      notes: opts.notes || '',
-      last_checked_at: null,
-      last_seen_url: '',
-      last_seen_price: 0,
-      last_seen_source: '',
-      created_at: new Date().toISOString(),
-    });
-    if (created) setWatchlist(prev => [...prev, created]);
-  };
-
-  const updateWatchlistItem = async (id, patch) => {
-    const updated = await store.update('watchlist', id, patch);
-    if (updated) setWatchlist(watchlist.map(w => w.id === id ? updated : w));
-  };
-
-  const removeFromWatchlist = async (id) => {
-    await store.remove('watchlist', id);
-    setWatchlist(watchlist.filter(w => w.id !== id));
-  };
+  // Watchlist is disabled in the normalized schema (no watchlist table yet).
+  // These are no-ops so the lingering "watch" toggle in Search can't error.
+  const addToWatchlist = async () => {};
+  const updateWatchlistItem = async () => {};
+  const removeFromWatchlist = async () => {};
 
   const sellEntry = async (id, sale) => {
     const entry = entries.find(e => e.id === id);
     if (!entry) return;
     await logTransaction({ type: 'sell', entry, sale });
-    await store.remove('entries', id);
+    // Soft-sell: retain the collected_cards row with date_sold/sold_price so
+    // realized P&L is preserved; it just drops out of the owned collection
+    // view (refreshData filters date_sold == null).
+    await store.update('collected_cards', id, {
+      date_sold: sale?.date || new Date().toISOString().slice(0, 10),
+      sold_price: Number(sale?.amount) || 0,
+    });
     setEntries(entries.filter(e => e.id !== id));
-    // Don't delete linked card-expense txs — they're part of the cost-basis
-    // story that the equity panel still needs to attribute capital correctly.
-    // The entry is gone but the historical expense remains in the ledger.
+    // Linked card-expense txs stay — they're part of the cost-basis story the
+    // equity panel still needs to attribute capital correctly.
   };
 
   // Manual transaction removal. Used to clean up mis-logged transfers/expenses
@@ -795,17 +1022,7 @@ export default function App() {
             onCardClick={setDetailCard}
           />
         )}
-        {view === 'watch' && (
-          <WatchView
-            watchlist={watchlist}
-            catalogIndex={catalogIndex}
-            variantRev={variantRev}
-            onCardClick={setDetailCard}
-            onBrowseCatalog={() => setView('search')}
-            onRemove={removeFromWatchlist}
-            onUpdate={updateWatchlistItem}
-          />
-        )}
+        {/* Watch tab hidden — the normalized schema has no watchlist table yet. */}
         {view === 'transactions' && (
           <TransactionsView
             transactions={transactions}
@@ -815,9 +1032,8 @@ export default function App() {
             variantRev={variantRev}
             activeCollectionId={activeCollectionId}
             onLogTransaction={async (tx) => {
-              const created = await store.insert('transactions', { id: uid(), ...tx, created_at: new Date().toISOString() });
-              if (created) setTransactions(prev => [...prev, created]);
-              else alert("Couldn't save the transaction. Check the console for the Supabase error.");
+              const created = await commitTransaction(tx);
+              if (!created) alert("Couldn't save the transaction. Check the console for the Supabase error.");
             }}
             onRemoveTransaction={removeTransaction}
           />
@@ -893,9 +1109,8 @@ export default function App() {
             members={members}
             onClose={() => setExpenseForEntry(null)}
             onSave={async (tx) => {
-              const created = await store.insert('transactions', { id: uid(), ...tx, created_at: new Date().toISOString() });
-              if (created) setTransactions(prev => [...prev, created]);
-              else alert("Couldn't save the expense. Check the console for the Supabase error.");
+              const created = await commitTransaction(tx);
+              if (!created) alert("Couldn't save the expense. Check the console for the Supabase error.");
               setExpenseForEntry(null);
             }}
           />
@@ -1021,9 +1236,6 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         </button>
         <button className={`op-nav-btn ${view === 'search' ? 'is-active' : ''}`} onClick={() => setView('search')}>
           <Search size={15} /> Search
-        </button>
-        <button className={`op-nav-btn ${view === 'watch' ? 'is-active' : ''}`} onClick={() => setView('watch')}>
-          <Eye size={15} /> Watch
         </button>
         <button className={`op-nav-btn ${view === 'sales' ? 'is-active' : ''}`} onClick={() => setView('sales')}>
           <Receipt size={15} /> Sales
@@ -1726,7 +1938,7 @@ function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, 
             <span className="op-entry-cardname-text">{card.name}</span>
             <VariantPill variant={card.variant} />
             {isGraded
-              ? <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} gradeDescription={entry.grade_description} />
+              ? <GradingBadge company={entry.grading_company} grade={entry.grade} gradeDescription={entry.grade_description} />
               : <RawBadge condition={entry.condition} />}
           </div>
           <div className="op-entry-cardset">
@@ -1776,13 +1988,14 @@ function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, 
   );
 }
 
-function GradingBadge({ company, grade, bgsBlack, gradeDescription }) {
-  const label = bgsBlack ? `${company} ${grade} BL` : `${company} ${grade}`;
-  const classKey = bgsBlack ? 'bgs-black' : (company || '').toLowerCase();
+function GradingBadge({ company, grade, gradeDescription }) {
+  const bl = isBlackLabel(grade);
+  const label = `${company} ${grade}`; // grade is 'BL' for Black Label
+  const classKey = bl ? 'bgs-black' : (company || '').toLowerCase();
   // Prefer the verbatim PSA grade description on hover when it's available
-  // ("GEM MT 10"); else fall back to "BGS 10 Black Label" or "PSA 10".
-  const titleText = bgsBlack
-    ? `${company} ${grade} Black Label (Perfect 10)`
+  // ("GEM MT 10"); else fall back to "BGS BL Black Label" or "PSA 10".
+  const titleText = bl
+    ? `${company} Black Label (Perfect 10)`
     : (gradeDescription || `${company} ${grade}`);
   return (
     <span className={`op-grade-badge is-${classKey}`} title={titleText}>
@@ -2389,7 +2602,6 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
       grading_company: 'PSA',
       grade: cert.grade,
       grade_description: cert.grade_description || '',
-      bgs_black: false,
       cert_number: cert.cert_number,
       graded_price: Number(gradedPrice) || 0,
       psa_spec_id: cert.spec_id || null,
@@ -4063,7 +4275,6 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
   const [isGraded, setIsGraded] = useState(Boolean(entry?.grading_company));
   const [gradingCompany, setGradingCompany] = useState(entry?.grading_company || 'PSA');
   const [grade, setGrade] = useState(entry?.grade ?? 10);
-  const [bgsBlack, setBgsBlack] = useState(Boolean(entry?.bgs_black));
   const [certNumber, setCertNumber] = useState(entry?.cert_number || '');
   const [gradedPrice, setGradedPrice] = useState(entry?.graded_price ? String(entry.graded_price) : '');
 
@@ -4087,8 +4298,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
       notes: notes.trim(),
       acquired_at: acquiredAt || null,
       grading_company: isGraded ? gradingCompany : null,
-      grade: isGraded ? Number(grade) : null,
-      bgs_black: Boolean(isGraded && gradingCompany === 'BGS' && Number(grade) === 10 && bgsBlack),
+      grade: isGraded ? (isBlackLabel(grade) ? 'BL' : Number(grade)) : null,
       cert_number: isGraded ? certNumber.trim() : '',
       graded_price: isGraded ? (Number(gradedPrice) || 0) : 0,
       // Legacy PriceCharting columns (pc_product_id, pc_product_name,
@@ -4209,9 +4419,9 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                     </select>
                   </Field>
                   <Field label="Grade">
-                    <select value={grade} onChange={(e) => setGrade(Number(e.target.value))}>
+                    <select value={grade} onChange={(e) => setGrade(e.target.value === 'BL' ? 'BL' : Number(e.target.value))}>
                       {(GRADES_BY_COMPANY[gradingCompany] || []).map(g => (
-                        <option key={g} value={g}>{g}</option>
+                        <option key={g} value={g}>{g === 'BL' ? 'BL (Black Label)' : g}</option>
                       ))}
                     </select>
                   </Field>
@@ -4219,13 +4429,6 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                     <input type="text" placeholder="e.g. 12345678" value={certNumber} onChange={(e) => setCertNumber(e.target.value)} />
                   </Field>
                 </div>
-
-                {gradingCompany === 'BGS' && Number(grade) === 10 && (
-                  <label className="op-graded-toggle" style={{ marginBottom: 8 }}>
-                    <input type="checkbox" checked={bgsBlack} onChange={(e) => setBgsBlack(e.target.checked)} />
-                    <span>Black Label (Perfect 10 · all four subgrades = 10)</span>
-                  </label>
-                )}
 
                 <Field label="Graded market price (USD)">
                   <input
@@ -4508,10 +4711,10 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                       <div>
                         <div className="op-detail-entry-collection">
                           {col?.name || 'Unknown collection'}
-                          {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} gradeDescription={entry.grade_description} />}
+                          {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} gradeDescription={entry.grade_description} />}
                         </div>
                         <div className="op-detail-entry-meta">
-                          {isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? ' Black Label' : ''}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}
+                          {isGraded ? `${entry.grading_company} ${entry.grade}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}
                           {entry.acquired_at && <> · Acquired {entry.acquired_at}</>}
                         </div>
                         {isGraded && (
@@ -4558,7 +4761,7 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                           <span className="op-tag op-tag-variant">{variant || 'base'}</span>
                           {s.grading_company && (
                             <span className="op-tag op-tag-grade">
-                              {s.grading_company} {s.grade}{s.bgs_black ? ' BLK' : ''}
+                              {s.grading_company} {s.grade}
                             </span>
                           )}
                           <span className="op-tag op-tag-market">{s.marketplace}</span>
@@ -4811,7 +5014,7 @@ function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, o
                     <span className="op-tag op-tag-variant">{variantSuffix || 'base'}</span>
                     {s.grading_company && (
                       <span className="op-tag op-tag-grade">
-                        {s.grading_company} {s.grade}{s.bgs_black ? ' BLK' : ''}
+                        {s.grading_company} {s.grade}
                       </span>
                     )}
                     <span className="op-tag op-tag-market">{s.marketplace}</span>
@@ -4870,7 +5073,6 @@ function LogSaleModal({ catalog, catalogIndex, existing, prefillCard, knownMarke
 
   const [gradingCompany, setGradingCompany] = useState(existing?.grading_company || 'PSA');
   const [grade, setGrade] = useState(existing?.grade != null ? String(existing.grade) : '10');
-  const [bgsBlack, setBgsBlack] = useState(Boolean(existing?.bgs_black));
   const [certNumber, setCertNumber] = useState(existing?.cert_number || '');
 
   const [saleDate, setSaleDate] = useState(existing?.sale_date || new Date().toISOString().slice(0, 10));
@@ -4909,8 +5111,7 @@ function LogSaleModal({ catalog, catalogIndex, existing, prefillCard, knownMarke
       await onSave({
         card_id: pickedCard.canonicalId || pickedCard.id,
         grading_company: gradingCompany || null,
-        grade: grade !== '' ? Number(grade) : null,
-        bgs_black: bgsBlack,
+        grade: isBlackLabel(grade) ? 'BL' : (grade !== '' ? Number(grade) : null),
         cert_number: certNumber.trim() || null,
         sale_date: saleDate,
         sale_price: Number(salePrice),
@@ -4980,7 +5181,7 @@ function LogSaleModal({ catalog, catalogIndex, existing, prefillCard, knownMarke
             )}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
             <div>
               <label className="op-label">Grading co.</label>
               <select className="op-input" value={gradingCompany} onChange={(e) => setGradingCompany(e.target.value)}>
@@ -4993,27 +5194,16 @@ function LogSaleModal({ catalog, catalogIndex, existing, prefillCard, knownMarke
             </div>
             <div>
               <label className="op-label">Grade</label>
-              <input
+              <select
                 className="op-input"
-                type="number"
-                step="0.5"
-                min="1"
-                max="10"
                 value={grade}
                 onChange={(e) => setGrade(e.target.value)}
                 disabled={!gradingCompany}
-              />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-              <label className="op-checkbox" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <input
-                  type="checkbox"
-                  checked={bgsBlack}
-                  onChange={(e) => setBgsBlack(e.target.checked)}
-                  disabled={gradingCompany !== 'BGS'}
-                />
-                BGS Black
-              </label>
+              >
+                {(GRADES_BY_COMPANY[gradingCompany] || GRADES_BY_COMPANY.PSA).map(g => (
+                  <option key={g} value={String(g)}>{g === 'BL' ? 'BL (Black Label)' : g}</option>
+                ))}
+              </select>
             </div>
           </div>
 

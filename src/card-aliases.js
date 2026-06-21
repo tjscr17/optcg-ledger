@@ -88,10 +88,10 @@ export const addCardAlias = async (cardId, alias) => {
   // Best-effort shared-mode insert; ignore failures so the UI stays
   // responsive (next refresh will re-hydrate from the source of truth).
   try {
-    await store.insert('card_aliases', {
+    await store.insert('card_nicknames', {
       id: crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      card_id: cardId,
-      alias: norm,
+      card_code: cardId,
+      nickname: norm,
       created_at: new Date().toISOString(),
     });
   } catch {}
@@ -113,8 +113,8 @@ export const removeCardAlias = async (cardId, alias) => {
   // reconcile.
   try {
     if (typeof store.removeWhere === 'function') {
-      await store.removeWhere('card_aliases', (r) =>
-        r.card_id === cardId && String(r.alias).toLowerCase() === String(alias).toLowerCase()
+      await store.removeWhere('card_nicknames', (r) =>
+        r.card_code === cardId && String(r.nickname).toLowerCase() === String(alias).toLowerCase()
       );
     }
   } catch {}

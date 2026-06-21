@@ -23,6 +23,12 @@ const supa = isShared ? createClient(SUPA_URL, SUPA_KEY) : null;
 
 export const MODE = isShared ? 'shared' : 'solo';
 
+// Global reference tables in the normalized schema have NO vault_key column —
+// they're shared across all vaults. The generic list/insert/subscribe paths
+// below must skip the vault_key filter/injection for these, or PostgREST errors
+// with "column vault_key does not exist".
+const GLOBAL_TABLES = new Set(['tcgs', 'grades', 'sets', 'cards', 'card_variants', 'sales']);
+
 // Last failing storage call's error details (Supabase code/message/details/hint
 // plus table). Exposed so UI handlers can surface a specific message — e.g.
 // "column foo doesn't exist" — instead of pointing the user at the console.
@@ -72,8 +78,19 @@ const solo = {
 };
 
 // ----- Shared (Supabase) -----
-// Expects tables: collections, entries, card_resolutions (each with vault_key
-// column + id uuid pk).
+//
+// ⚠️  NORMALIZED SCHEMA (2026-06): the app now uses the normalized schema —
+// collections, collected_cards, contributions, transactions,
+// transaction_contributions, sales, card_nicknames (vault-scoped) plus the
+// GLOBAL reference tables tcgs, grades, sets, cards, card_variants (no
+// vault_key — see GLOBAL_TABLES above). The authoritative DDL + migration live
+// in db/redesign/schema.sql and db/redesign/migrate_apply.sql. App.jsx reshapes
+// these tables to/from the legacy in-memory shapes at the data-access boundary.
+// The legacy table definitions below are retained for historical reference; the
+// original rows are preserved in the legacy_* tables as a backup.
+//
+// Legacy (pre-normalization) — expected tables: collections, entries,
+// card_resolutions (each with vault_key column + id uuid pk).
 //
 // SQL to run once in Supabase SQL editor:
 //
@@ -285,12 +302,14 @@ const solo = {
 
 const shared = {
   async list(table) {
-    const { data, error } = await supa.from(table).select('*').eq('vault_key', VAULT_KEY);
+    let query = supa.from(table).select('*');
+    if (!GLOBAL_TABLES.has(table)) query = query.eq('vault_key', VAULT_KEY);
+    const { data, error } = await query;
     if (error) { console.error(error); return []; }
     return data || [];
   },
   async insert(table, row) {
-    const payload = { ...row, vault_key: VAULT_KEY };
+    const payload = GLOBAL_TABLES.has(table) ? { ...row } : { ...row, vault_key: VAULT_KEY };
     delete payload.id;
     const { data, error } = await supa.from(table).insert(payload).select().single();
     if (error) {
@@ -321,65 +340,23 @@ const shared = {
     if (error) console.error(error);
   },
   subscribe(table, callback) {
+    // Global tables have no vault_key, so don't filter on it.
+    const opts = GLOBAL_TABLES.has(table)
+      ? { event: '*', schema: 'public', table }
+      : { event: '*', schema: 'public', table, filter: `vault_key=eq.${VAULT_KEY}` };
     const channel = supa
       .channel(`changes:${table}`)
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table, filter: `vault_key=eq.${VAULT_KEY}` },
-        () => callback()
-      )
+      .on('postgres_changes', opts, () => callback())
       .subscribe();
     return () => supa.removeChannel(channel);
   },
-  async listResolutions() {
-    // PostgREST caps a single select at the project's max-rows (1000 by
-    // default). A full catalog easily exceeds that, so page through with
-    // .range() until a short page signals the end — otherwise only the first
-    // 1000 resolutions hydrate and the rest re-resolve on every refresh.
-    const PAGE = 1000;
-    const all = [];
-    let from = 0;
-    for (;;) {
-      const { data, error } = await supa
-        .from('card_resolutions')
-        .select('card_id, tcg_id, snapshot')
-        .eq('vault_key', VAULT_KEY)
-        .range(from, from + PAGE - 1);
-      if (error) { console.error('listResolutions failed', error); break; }
-      if (!data || data.length === 0) break;
-      all.push(...data);
-      from += data.length;
-      if (data.length < PAGE) break;
-    }
-    return all;
-  },
-  async upsertResolution(cardId, payload) {
-    const { error } = await supa
-      .from('card_resolutions')
-      .upsert(
-        { vault_key: VAULT_KEY, card_id: cardId, updated_at: new Date().toISOString(), ...payload },
-        { onConflict: 'vault_key,card_id' }
-      );
-    if (error) console.error('upsertResolution failed', error);
-    return !error;
-  },
-  async deleteAllResolutions() {
-    const { error, count } = await supa
-      .from('card_resolutions')
-      .delete({ count: 'exact' })
-      .eq('vault_key', VAULT_KEY);
-    if (error) { console.error('deleteAllResolutions failed', error); return 0; }
-    return count || 0;
-  },
-  subscribeResolutions(callback) {
-    const channel = supa
-      .channel('changes:card_resolutions')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'card_resolutions', filter: `vault_key=eq.${VAULT_KEY}` },
-        (payload) => callback(payload)
-      )
-      .subscribe();
-    return () => supa.removeChannel(channel);
-  },
+  // Card-resolution layer is retired in the normalized schema (the old
+  // card_resolutions table is now legacy_card_resolutions and no longer read).
+  // These are no-ops so the vestigial migration/pricing callers don't error.
+  async listResolutions() { return []; },
+  async upsertResolution() { return true; },
+  async deleteAllResolutions() { return 0; },
+  subscribeResolutions() { return () => {}; },
 };
 
 export const store = isShared ? shared : solo;
