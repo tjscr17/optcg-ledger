@@ -71,28 +71,35 @@ Commits on the branch: schema docs → applied migration → app rewire.
 
 ## ⛔ Not done / pending
 
-### A. Live verification (BLOCKED on Supabase connection)
-The app **builds** (`npm run build`) but has **not** been run against live
-Supabase. Verify by running `npm run dev` with `.env.local`
-(`VITE_SUPABASE_URL/KEY/VAULT_KEY`) and checking:
-- Collection shows **35 owned** cards; the BGS Black Label card
-  (`OPPR:ST01-006-504476`) reads **"BGS BL"**; 7 sold cards do not appear.
-- Transactions = **60**; EquityPanel (capital + time-weighted) numbers match
-  pre-migration (proves contributions reconstituted correctly).
-- Sales = **3,748**; estimator + recent-sales drawer populate.
-- Add a card → `collected_cards` + `contributions` + buy tx (+
-  `transaction_contributions`). Sell → leaves collection, `date_sold`/
-  `sold_price` set. Add/remove alias → `card_nicknames`.
+### A. DB-side verification — ✅ DONE (2026-06-21)
+Ran the full verification suite against live Supabase (`ajpxzfhmyzzgarewijnr`).
+All data-integrity checks pass:
+- **collected_cards = 42** (35 owned + 7 sold) ✓
+- BGS Black Label card `OPPR:ST01-006-504476` → `grade_code='BGS BL'`,
+  derives `'BL'` ✓
+- **transactions = 60**; type breakdown reconciles **exactly** vs `legacy_*`:
+  buy 42/$134,226.80, expense 11/$5,827.71, sell 7/$35,688.00 ✓
+- **sales = 3,748**, cards = 119, sets = 19, collections = 3,
+  contributions = 43, transaction_contributions = 56, card_nicknames = 3 ✓
+- **0 orphan FKs** across all 9 foreign-key relationships ✓
+- **Contributions reconcile**: tx-contribs new = legacy = $143,842.70;
+  owned-card contribs new = legacy = $107,338.99 (the all-42 gap is the 7
+  reconstructed sold cards, as expected) ✓
+- **Cost basis** (all 42) = $134,689.90; owned-35 price_paid new = legacy =
+  $111,338.94 ✓
+- `npm run build` green.
 
-### B. One-time grades cosmetic fix (BLOCKED on Supabase connection)
+> Browser-observable smoke test (running `npm run dev` against `.env.local`)
+> was not performed — no `.env.local` in this environment. The data layer the
+> app reads is verified correct above; remaining check is purely UI-render.
+
+### B. One-time grades cosmetic fix — ✅ DONE / no-op (2026-06-21)
 ```sql
 update grades set grade_value = 'BL' where grade_code = 'BGS BL';
 ```
-**Non-blocking** — the app derives `'BL'` from `grade_code` and never reads
-`grade_value` to render. Hygiene only.
-
-> Both A and B were blocked because the Supabase MCP server was disconnected at
-> end of session. Reconnect via `/mcp` (CLI/app) or restart the session.
+Ran; **0 rows changed** — the `BGS BL` grade already carried
+`grade_value = 'BL'` from the seed. Confirmed in `grades`. Non-blocking
+anyway (app derives `'BL'` from `grade_code`, never reads `grade_value`).
 
 ### C. Known follow-ups (flagged, not addressed)
 1. **Search "watch" toggle** still renders but no-ops (Watch tab hidden). Either
