@@ -1,162 +1,81 @@
 // ============================================================================
-// Card catalog — TCGPlayer (via TCGCSV) as the single source of truth.
+// Card catalog — Supabase `cards` table as the single source of truth.
 //
-// Loader iterates TCGPlayer groups: one /api/tcgcsv?groups=1 call to get the
-// group list, then /api/tcgcsv?groupAbbr=X per group with browser-side
-// concurrency 6. Each per-group call is small enough to fit Vercel's
-// serverless timeout reliably; a single ?all=1 path was tried first and
-// 502'd on cold function instances. Total ~5–15s on first load, then
-// 24h-cached in localStorage.
+// Switched 2026-06-22 from the TCGPlayer/TCGCSV-sourced catalog to the
+// rebuilt relational catalog in the `ajpxzfhmyzzgarewijnr` Supabase project.
+// Each catalog card now IS a row in public.cards (one row per printing),
+// joined to public.sets for set name/code. Identity is the cards.id UUID —
+// not the old TCGPlayer canonical-string scheme.
 //
-// Cache key: `optcg:catalog:v11:<variant-fingerprint>`. The fingerprint
-// component invalidates the cache when the user edits printing-attribute
-// variants from the Variants manager.
+// What changed vs the TCGCSV era:
+//   + Clean official data: canonical card_code (OP01-039), explicit
+//     variant_key (base/p1/p2/r1...), real name/rarity/category, and a
+//     working image_url on every printing.
+//   + Identity is a stable UUID (card.id), shared with collected_cards.card_id
+//     in the same DB — no string-canonical derivation.
+//   − No pricing yet. The TCGCSV price feed is dropped; market/low/mid/high
+//     are 0 until a new price source is wired (planned: self-tracked price
+//     snapshots in the new DB). pricing.js reads stay graceful at 0.
+//   − Attributes are no longer regex-detected from a sales name; the printing
+//     is identified by variant_key directly.
 //
-// What you get vs the OPTCGAPI source we replaced (switch: 2026-06-01):
-//   + Complete printing coverage (every TCGPlayer product, every event set).
-//   + Each card already knows its tcg_id at build time — no per-card Resolve.
-//   − No game data: color, type, cost, power, life, counter, attribute,
-//     sub_types, card text. TCGPlayer is sales metadata.
-//   − Card names are sales-formatted with parenthetical variant suffixes
-//     intact (`Shanks (Parallel) (Manga Rare)`); the cleaned form lives on
-//     `card.name`, the full form on `card.fullName`.
-//   − Pre-errata twins still supported (purely user-marked via
-//     togglePreErrata); the OPTCGAPI-curated errata heuristic is gone.
-//   − No 14-day price history (OPTCGAPI's `/twoweeks/` endpoint).
+// Loads all EN printings (source='bandai-official') once, 24h-cached in
+// localStorage. ~4.5k rows, paginated 1000 at a time (PostgREST row cap).
 // ============================================================================
 
-import { detectPrintingAttributes, printingAttributesFingerprint } from './printing-attributes.js';
+import { createClient } from '@supabase/supabase-js';
 
-const GROUPS_ENDPOINT = '/api/tcgcsv?groups=1';
-const groupEndpoint = (abbr) => `/api/tcgcsv?groupAbbr=${encodeURIComponent(abbr)}`;
-// v11 = TCGPlayer-sourced catalog (was v10 OPTCGAPI-sourced). The fingerprint
-// suffix invalidates cache when the user edits variant detection rules.
-const CACHE_KEY_BASE = 'optcg:catalog:v11';
-const cacheKey = () => `${CACHE_KEY_BASE}:${printingAttributesFingerprint()}`;
+// Dedicated read-only client for the public catalog (cards/sets carry no
+// vault_key, so this must NOT go through storage.js's vault-scoped client).
+// Falls back to the project's public anon key so the catalog works even in
+// solo mode (no VITE_SUPABASE_* set); the anon key is bundle-safe by design.
+const CATALOG_URL = import.meta.env.VITE_SUPABASE_URL || 'https://ajpxzfhmyzzgarewijnr.supabase.co';
+const CATALOG_KEY = import.meta.env.VITE_SUPABASE_KEY
+  || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFqcHh6ZmhteXp6Z2FyZXdpam5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNTM3MjQsImV4cCI6MjA5NDcyOTcyNH0.YQ4V0pxw1tpOiVe_d9nxL0UqbHR-eFPTjiybpd2O28o';
+const catalogClient = createClient(CATALOG_URL, CATALOG_KEY);
+
+const CACHE_KEY = 'optcg:catalog:v12-supabase'; // bump invalidates old TCGCSV cache
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const LANGUAGE = 'EN'; // catalog is EN-West for now; other langs exist in DB
+const PAGE = 1000; // PostgREST default max rows per request
 
-const fetchJSON = async (url) => {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url} returned ${res.status}`);
-  return res.json();
-};
-
-// Normalize a set abbreviation / id to a stable comparable token.
-//   "OP-14"   → "OP14"
-//   "OP14 RE" → "OP14RE"
-//   "ST-29"   → "ST29"
 const normSetToken = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-// Compute the leading set token from a TCGPlayer product number.
-//   "OP14-118"   → "OP14"
-//   "ST29-001"   → "ST29"
-//   "P-001"      → "P"
-const identityPrefixOf = (displayId) => {
-  if (!displayId) return '';
-  const m = displayId.match(/^[A-Z]+\d*/i);
-  return m ? m[0].toUpperCase() : '';
-};
-
-// Strip TCGPlayer's parenthetical variant suffixes off the product name to
-// produce a clean game-style card name.
-//   "Shanks (Parallel) (Manga Rare) (Alternate Art)" → "Shanks"
-//   "Monkey D. Luffy (012)"                          → "Monkey D. Luffy"
-const cleanGameName = (rawName) => {
-  if (!rawName) return '';
-  return String(rawName)
-    .replace(/\s*\([^)]*\)\s*/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-};
-
-// Build the source-stable canonical id for a normalized card.
-// Format: `[<sourceSet>:]<displayId>[-<attributeTag>]`
-//   - sourceSet prefix is included only when the card's set differs from the
-//     identity baked into the displayId. So a base OP14-118 in the OP14 group
-//     stays "OP14-118"; the same number in "OP14 RE" becomes "OP14RE:OP14-118".
-//   - attributeTag is the sorted printing attributes joined by "-"
-//     (e.g., "parallel", "manga", "manga-parallel"). Empty for base printings.
-// Collisions (multiple products sharing the same canonical) get a `-<tcg_id>`
-// suffix appended downstream in `finalizeCanonicalIds`.
-const canonicalIdOf = (card) => {
-  if (!card) return '';
-  const display = card.displayId || '';
-  const sourceNorm = normSetToken(card.setId);
-  const identityPrefix = identityPrefixOf(display);
-  const attrs = Array.isArray(card.attributes) ? [...card.attributes].sort() : [];
-  // Pre-errata twin override wins over attribute-driven tags.
-  let tag = '';
-  if (card.variantTag === 'pre-errata') tag = 'pre-errata';
-  else if (attrs.length > 0) tag = attrs.join('-');
-  const suffix = tag ? `-${tag}` : '';
-  if (sourceNorm && identityPrefix && sourceNorm !== identityPrefix) {
-    return `${sourceNorm}:${display}${suffix}`;
-  }
-  return `${display}${suffix}`;
-};
-
-// TCGPlayer product → catalog card. Game data fields (color, cost, etc.)
-// stay undefined; consumers should render gracefully when absent.
-const normalize = (product) => {
-  const number = product.number || '';
-  const setAbbr = product.group_abbreviation || '';
-  const setName = product.group_name || '';
-  const rawName = product.name || '';
+// Supabase cards row (joined to sets) → catalog card object. Keeps the field
+// names the rest of the app already reads (displayId, setId, imageUrl, …) so
+// consumers don't change; identity moves to the UUID `id`/`canonicalId`.
+const normalize = (row) => {
+  const set = row.sets || {};
+  const variant = row.variant_key || 'base';
+  const isBase = variant === 'base';
   const card = {
-    id: String(product.tcg_id),
-    displayId: number,
-    name: cleanGameName(product.clean_name || rawName),
-    fullName: rawName,
-    cleanName: product.clean_name || '',
-    setId: setAbbr,
-    setName,
-    setAbbreviation: setAbbr,
-    rarity: product.rarity || '',
-    imageUrl: product.image_url || '',
-    tcgplayerUrl: product.tcgplayer_url || '',
-    tcg_id: Number(product.tcg_id) || 0,
-    // Pricing snapshot at catalog-build time. The per-card price cache
-    // (pricing.js PRICE_CACHE_KEY) is the live source — this is the
-    // initial value for display before any refresh.
-    marketPrice: Number(product.market_price) || 0,
-    lowPrice: Number(product.low_price) || 0,
-    midPrice: Number(product.mid_price) || 0,
-    highPrice: Number(product.high_price) || 0,
-    // Generic printing attributes from the registry (parallel, manga, plus
-    // any user-defined variant). Same regex applied to TCGPlayer's full
-    // product name.
-    attributes: detectPrintingAttributes(rawName),
-    source: 'tcgplayer',
+    id: row.id,                       // UUID — the identity
+    canonicalId: row.id,              // identity used as stored card_id
+    displayId: row.card_code || '',   // official number, e.g. OP01-039
+    variantKey: variant,              // base / p1 / p2 / r1 ...
+    name: row.name || '',
+    fullName: isBase ? (row.name || '') : `${row.name || ''} (${variant})`,
+    cleanName: row.name || '',
+    setId: set.set_code || '',
+    setName: set.name || '',
+    setAbbreviation: set.set_code || '',
+    rarity: row.rarity || '',
+    category: row.category || '',
+    imageUrl: row.image_url || '',
+    tcgplayerUrl: '',
+    // Pricing deferred — no source yet. Kept as 0 so price reads stay graceful.
+    tcg_id: 0,
+    marketPrice: 0, lowPrice: 0, midPrice: 0, highPrice: 0,
+    // Attributes now come from variant_key, not name regex.
+    attributes: isBase ? [] : [variant],
+    source: row.source || 'bandai-official',
   };
-  // Derived booleans for back-compat with code that still reads them.
-  card.isParallel = card.attributes.includes('parallel');
-  card.isManga = card.attributes.includes('manga');
+  card.isParallel = /^p\d+$/.test(variant);
+  card.isManga = false; // not distinguishable from variant_key alone (treatment map TBD)
   return card;
 };
 
-// Two-pass canonical id assignment that breaks collisions (multiple products
-// share the same displayId + attribute set — rare but possible) by appending
-// the tcg_id to all collisions so each canonical id is globally unique.
-const finalizeCanonicalIds = (cards) => {
-  const baseFor = new Map();
-  for (const c of cards) baseFor.set(c, canonicalIdOf(c));
-  const counts = new Map();
-  for (const base of baseFor.values()) counts.set(base, (counts.get(base) || 0) + 1);
-  for (const c of cards) {
-    const base = baseFor.get(c);
-    c.canonicalId = counts.get(base) > 1 ? `${base}-${c.tcg_id}` : base;
-  }
-  return cards;
-};
-
-// Sort bucket: lower number = appears first in the Search view's set groups.
-//   1: OP main boosters (OP01, OP02, …)
-//   2: Release-event / tournament / anniversary groups (OP14 RE, OP05 ANN, …)
-//   3: Extra boosters (EB, PRB)
-//   4: Starter decks (ST, ST-EX)
-//   5: Promos
-//   6: DON
-//   9: anything unrecognized
+// Sort bucket: lower = earlier in the Search view's set groups.
 const bucketOfSet = (setId) => {
   if (!setId) return 9;
   const norm = normSetToken(setId);
@@ -164,12 +83,20 @@ const bucketOfSet = (setId) => {
   if (/^OP\d+$/.test(norm)) return 1;
   if (/^EB\d*$/.test(norm) || /^PRB\d*$/.test(norm)) return 3;
   if (/^ST/.test(norm)) return 4;
-  if (/^P$/.test(norm) || /PROMO/.test(norm)) return 5;
-  if (/^DON/.test(norm)) return 6;
+  if (/^OPPR$/.test(norm) || /^P$/.test(norm) || /PROMO/.test(norm)) return 5;
+  if (/^OPOT$/.test(norm)) return 6;
   return 9;
 };
 
 const numericPart = (setId) => parseInt(((setId || '').match(/(\d+)/) || [])[1] || '0', 10);
+
+export const compareSets = (a, b) => {
+  const ab = bucketOfSet(a.setId);
+  const bb = bucketOfSet(b.setId);
+  if (ab !== bb) return ab - bb;
+  if (ab === 1 || ab === 2 || ab === 4) return numericPart(a.setId) - numericPart(b.setId);
+  return (a.setId || '').localeCompare(b.setId || '');
+};
 
 // Group catalog cards by set for the Search view's set-grouped layout.
 export const groupBySet = (cards) => {
@@ -182,22 +109,13 @@ export const groupBySet = (cards) => {
   return Array.from(groups.values()).sort(compareSets);
 };
 
-export const compareSets = (a, b) => {
-  const ab = bucketOfSet(a.setId);
-  const bb = bucketOfSet(b.setId);
-  if (ab !== bb) return ab - bb;
-  // Same bucket: numeric within OP boosters and starters; alphabetical elsewhere.
-  if (ab === 1 || ab === 2 || ab === 4) return numericPart(a.setId) - numericPart(b.setId);
-  return (a.setId || '').localeCompare(b.setId || '');
-};
-
 // ---------------------------------------------------------------------------
 // Loader + cache
 // ---------------------------------------------------------------------------
 
 const readCachedCatalog = () => {
   try {
-    const raw = localStorage.getItem(cacheKey());
+    const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const { ts, cards } = JSON.parse(raw);
     if (!Array.isArray(cards) || cards.length === 0) return null;
@@ -220,77 +138,61 @@ export const loadCatalog = async ({ force = false } = {}) => {
   return revalidateCatalog();
 };
 
-// Iterate TCGPlayer groups via the proxy, fetching products per group in
-// parallel (browser-side, bounded concurrency). This is much more reliable
-// than one big `?all=1` call — each per-group call is ~600–900 ms, well
-// inside Vercel's serverless timeout even on a cold function instance.
-const fetchAllProducts = async () => {
-  const groupsBody = await fetchJSON(GROUPS_ENDPOINT);
-  const groups = Array.isArray(groupsBody?.groups) ? groupsBody.groups : [];
-  if (groups.length === 0) return [];
+// Page through every EN bandai-official printing (PostgREST caps a single
+// request at ~1000 rows, so we range-paginate until a short page returns).
+const fetchAllCards = async () => {
   const all = [];
-  const concurrency = 6;
-  let next = 0;
-  const workers = Array.from({ length: Math.min(concurrency, groups.length) }, async () => {
-    while (next < groups.length) {
-      const g = groups[next++];
-      if (!g.abbreviation) continue;
-      try {
-        const body = await fetchJSON(groupEndpoint(g.abbreviation));
-        if (Array.isArray(body?.products)) all.push(...body.products);
-      } catch (e) {
-        console.warn(`[catalog] group ${g.abbreviation} fetch failed`, e);
-      }
-    }
-  });
-  await Promise.all(workers);
+  let from = 0;
+  for (;;) {
+    const { data, error } = await catalogClient
+      .from('cards')
+      .select('id,card_code,variant_key,name,rarity,category,image_url,sets!inner(set_code,name,language)')
+      .eq('source', 'bandai-official')
+      .eq('sets.language', LANGUAGE)
+      .order('card_code', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`catalog query failed: ${error.message}`);
+    if (!data || data.length === 0) break;
+    all.push(...data);
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
   return all;
 };
 
 const revalidateCatalog = async () => {
   if (catalogPromise) return catalogPromise;
   catalogPromise = (async () => {
-    const products = await fetchAllProducts();
-    const cards = products.map(normalize).filter(c => c.id && c.displayId);
-    finalizeCanonicalIds(cards);
+    const rows = await fetchAllCards();
+    const cards = rows.map(normalize).filter(c => c.id && c.displayId);
     const final = cards.sort((a, b) => {
       if (a.setId !== b.setId) return compareSets(a, b);
       return (a.displayId || '').localeCompare(b.displayId || '');
     });
-
     try {
-      localStorage.setItem(cacheKey(), JSON.stringify({ ts: Date.now(), cards: final }));
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cards: final }));
     } catch {
-      // localStorage might be full — try a slim variant without the price
-      // snapshot fields (the price cache fills those in live).
+      // localStorage full — store a slim shape (drop the few non-essential fields).
       const slim = final.map(c => ({
-        id: c.id, canonicalId: c.canonicalId, displayId: c.displayId,
+        id: c.id, canonicalId: c.canonicalId, displayId: c.displayId, variantKey: c.variantKey,
         name: c.name, fullName: c.fullName, cleanName: c.cleanName,
         setId: c.setId, setName: c.setName, setAbbreviation: c.setAbbreviation,
-        rarity: c.rarity, imageUrl: c.imageUrl, tcgplayerUrl: c.tcgplayerUrl,
-        tcg_id: c.tcg_id, attributes: c.attributes,
-        isParallel: c.isParallel, isManga: c.isManga, source: c.source,
+        rarity: c.rarity, category: c.category, imageUrl: c.imageUrl,
+        tcg_id: 0, attributes: c.attributes, isParallel: c.isParallel, isManga: c.isManga,
+        source: c.source,
       }));
-      try { localStorage.setItem(cacheKey(), JSON.stringify({ ts: Date.now(), cards: slim })); } catch {}
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cards: slim })); } catch {}
     }
-
     return final;
   })().finally(() => { catalogPromise = null; });
-
   return catalogPromise;
 };
 
-// Price history was OPTCGAPI's `/twoweeks/` endpoint, now gone with the
-// source switch. The detail drawer dropped the 14-day trend widget that
-// consumed it. If a self-tracked snapshot table appears later, re-introduce
-// loadPriceHistory here.
-
 // ---------------------------------------------------------------------------
-// Pre-errata twins. A user marks a card as having a pre-errata printing; the
-// catalog then exposes both versions as separate entries (base = post-errata,
-// twin = pre-errata) so they can be logged independently with their own
-// prices, contributions, grading, etc. Persisted in localStorage; survives
-// catalog cache bumps.
+// Pre-errata twins. User marks a card as having a pre-errata printing; the
+// catalog then exposes both versions as separate entries so they can be logged
+// independently. Persisted in localStorage; survives catalog cache bumps.
+// (Identity for the twin is the base UUID suffixed with __pre-errata.)
 // ---------------------------------------------------------------------------
 
 const ERRATA_KEY = 'optcg:errata:v1';
@@ -318,14 +220,13 @@ export const augmentWithErrata = (catalog) => {
   const twins = [];
   for (const c of catalog) {
     if (!set.has(c.id)) continue;
-    const twin = {
+    twins.push({
       ...c,
       id: `${c.id}${ERRATA_SUFFIX}`,
+      canonicalId: `${c.id}${ERRATA_SUFFIX}`,
       variant: 'Pre-errata',
       variantTag: 'pre-errata',
-    };
-    twin.canonicalId = canonicalIdOf(twin);
-    twins.push(twin);
+    });
   }
   return twins.length > 0 ? [...catalog, ...twins] : catalog;
 };
