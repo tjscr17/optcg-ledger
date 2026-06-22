@@ -102,6 +102,25 @@ export const compareSets = (a, b) => {
   return (a.setId || '').localeCompare(b.setId || '');
 };
 
+// Variant ordering within one card number: base, then p1,p2,… then r1,r2,…
+const variantRank = (v) => {
+  if (!v || v === 'base') return 0;
+  const m = /^([a-z])(\d+)$/.exec(v);
+  if (!m) return 9000;
+  const tier = m[1] === 'p' ? 1000 : m[1] === 'r' ? 2000 : 3000;
+  return tier + (parseInt(m[2], 10) || 0);
+};
+
+// Full card order matching the official cardlist: set → card number → variant.
+// displayId is zero-padded (OP01-001), so a string compare gives numeric order
+// within a set; variantRank breaks ties so base precedes its parallels.
+export const compareCards = (a, b) => {
+  if (a.setId !== b.setId) return compareSets(a, b);
+  const ad = a.displayId || '', bd = b.displayId || '';
+  if (ad !== bd) return ad.localeCompare(bd);
+  return variantRank(a.variantKey) - variantRank(b.variantKey);
+};
+
 // Group catalog cards by set for the Search view's set-grouped layout.
 export const groupBySet = (cards) => {
   const groups = new Map();
@@ -169,10 +188,7 @@ const revalidateCatalog = async () => {
   catalogPromise = (async () => {
     const rows = await fetchAllCards();
     const cards = rows.map(normalize).filter(c => c.id && c.displayId);
-    const final = cards.sort((a, b) => {
-      if (a.setId !== b.setId) return compareSets(a, b);
-      return (a.displayId || '').localeCompare(b.displayId || '');
-    });
+    const final = cards.sort(compareCards);
     try {
       localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cards: final }));
     } catch {

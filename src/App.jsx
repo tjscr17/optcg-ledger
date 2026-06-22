@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
-import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
+import { loadCatalog, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
@@ -1902,10 +1902,7 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
     if (sortBy === 'name') arr.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     else if (sortBy === 'price-desc') arr.sort((a, b) => effectiveRawPrice(b) - effectiveRawPrice(a));
     else if (sortBy === 'price-asc') arr.sort((a, b) => effectiveRawPrice(a) - effectiveRawPrice(b));
-    else arr.sort((a, b) => {
-      if (a.setId !== b.setId) return compareSets(a, b);
-      return (a.id || '').localeCompare(b.id || '');
-    });
+    else arr.sort(compareCards); // set → card number → variant (matches the official cardlist)
     return arr;
     // variantRev forces the array to re-create when fresh prices land, so
     // tiles re-render with the latest cached price too.
