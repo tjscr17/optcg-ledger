@@ -25,13 +25,14 @@
 
 import { createClient } from '@supabase/supabase-js';
 
-// Dedicated read-only client for the public catalog (cards/sets carry no
-// vault_key, so this must NOT go through storage.js's vault-scoped client).
-// Falls back to the project's public anon key so the catalog works even in
-// solo mode (no VITE_SUPABASE_* set); the anon key is bundle-safe by design.
-const CATALOG_URL = import.meta.env.VITE_SUPABASE_URL || 'https://ajpxzfhmyzzgarewijnr.supabase.co';
-const CATALOG_KEY = import.meta.env.VITE_SUPABASE_KEY
-  || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFqcHh6ZmhteXp6Z2FyZXdpam5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNTM3MjQsImV4cCI6MjA5NDcyOTcyNH0.YQ4V0pxw1tpOiVe_d9nxL0UqbHR-eFPTjiybpd2O28o';
+// Dedicated read-only client for the public catalog. The catalog DB is a FIXED
+// project (the rebuilt relational catalog) — intentionally hardcoded and NOT
+// read from VITE_SUPABASE_*. Those vars drive storage.js's vault-scoped client
+// (shared mode) and on Vercel may point at a different/older project; letting
+// the catalog follow them caused empty results. cards/sets carry no vault_key
+// and are world-readable via the public anon key (bundle-safe by design).
+const CATALOG_URL = 'https://ajpxzfhmyzzgarewijnr.supabase.co';
+const CATALOG_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFqcHh6ZmhteXp6Z2FyZXdpam5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNTM3MjQsImV4cCI6MjA5NDcyOTcyNH0.YQ4V0pxw1tpOiVe_d9nxL0UqbHR-eFPTjiybpd2O28o';
 const catalogClient = createClient(CATALOG_URL, CATALOG_KEY);
 
 const CACHE_KEY = 'optcg:catalog:v12-supabase'; // bump invalidates old TCGCSV cache
@@ -151,7 +152,7 @@ const fetchAllCards = async () => {
       .eq('sets.language', LANGUAGE)
       .order('card_code', { ascending: true })
       .range(from, from + PAGE - 1);
-    if (error) throw new Error(`catalog query failed: ${error.message}`);
+    if (error) { console.error('[catalog] Supabase query failed', error); throw new Error(`catalog query failed: ${error.message}`); }
     if (!data || data.length === 0) break;
     all.push(...data);
     if (data.length < PAGE) break;
