@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
-import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink, Archive } from 'lucide-react';
+import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink, Archive, AlertTriangle } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata, searchAlternateSource, deriveVariantKey, addExternalCard } from './catalog.js';
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
@@ -182,6 +182,21 @@ const gradeOptionValue = (opt) => `${opt.grade}${opt.special ? ':S' : ''}`;
 const parseGradeOptionValue = (v) => ({ grade: Number(String(v).replace(':S', '')), special: String(v).endsWith(':S') });
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+// A transaction is "fully attributed" when its contributions cover its amount.
+// buy/sell/expense/payout: the contribution magnitudes sum to the amount.
+// transfer is signed (zero-sum), so we check the sender (positive) side covers
+// it. Zero-amount rows have nothing to attribute.
+const txAttributedTotal = (tx) => {
+  const list = Array.isArray(tx.contributions) ? tx.contributions : [];
+  if (tx.type === 'transfer') return list.reduce((s, c) => s + Math.max(0, Number(c.amount) || 0), 0);
+  return list.reduce((s, c) => s + Math.abs(Number(c.amount) || 0), 0);
+};
+const isTxFullyAttributed = (tx) => {
+  const amt = Math.abs(Number(tx.amount) || 0);
+  if (amt < 0.01) return true;
+  return Math.abs(txAttributedTotal(tx) - amt) < 0.01;
+};
 
 // ============================================================================
 export default function App() {
@@ -3898,7 +3913,10 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
         <div>
           <div className="op-eyebrow">Activity</div>
           <h1 className="op-page-title">Transactions</h1>
-          <div className="op-page-sub">{filtered.length.toLocaleString()} {filtered.length === 1 ? 'transaction' : 'transactions'}</div>
+          <div className="op-page-sub">
+            {filtered.length.toLocaleString()} {filtered.length === 1 ? 'transaction' : 'transactions'}
+            {(() => { const n = filtered.filter(t => !isTxFullyAttributed(t)).length; return n > 0 ? <> · <span style={{ color: '#d98324', fontWeight: 600 }}>{n} unattributed</span></> : null; })()}
+          </div>
         </div>
       </div>
 
@@ -4091,11 +4109,26 @@ function TransactionRow({ tx, collection, catalogIndex, onEdit, onDelete }) {
     payout:   { label: 'PAYOUT',   cls: 'is-expense',  tone: 'is-neg', sign: '−' },
   }[tx.type] || { label: (tx.type || '').toUpperCase(), cls: '', tone: '', sign: '' };
 
+  // Flag rows whose contributions don't fully cover the amount (e.g. a buy with
+  // no/partial contributions, a trade card leg, a mis-entered split).
+  const attributed = txAttributedTotal(tx);
+  const fullyAttributed = isTxFullyAttributed(tx);
+
   return (
     <div className={`op-tx-row ${meta.cls}`}>
       <div className="op-tx-type">{meta.label}</div>
       <div className="op-tx-main">
-        <div className="op-tx-card">{display}</div>
+        <div className="op-tx-card">
+          {display}
+          {!fullyAttributed && (
+            <span
+              title={`Contributions ($${attributed.toFixed(2)}) don't cover the $${amount.toFixed(2)} amount — $${(amount - attributed).toFixed(2)} unattributed`}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 8, padding: '1px 6px', borderRadius: 5, background: 'rgba(217,131,36,0.18)', color: '#d98324', fontSize: 11, fontWeight: 600, verticalAlign: 'middle' }}
+            >
+              <AlertTriangle size={11} /> unattributed
+            </span>
+          )}
+        </div>
         <div className="op-tx-meta">
           {collection?.name || '—'}
           {tx.occurred_at && <> · {tx.occurred_at}</>}
