@@ -703,6 +703,103 @@ export default function App() {
     // Linked card-expense txs stay — part of the cost-basis story for equity.
   };
 
+  // A trade swaps cards (and optional cash) in a single event. Model: each
+  // outgoing card is retain-sold for its credit value, each incoming card is
+  // added at its cost basis, and any net cash is one balanced leg attributed to
+  // a member. The per-card buy/sell legs carry NO contributions, so they're
+  // equity-neutral — a card-for-card swap doesn't change anyone's invested
+  // capital; only the cash leg moves a member's equity. All legs are tagged
+  // "Trade" in notes so they read as one event in the ledger. NOTE: the card
+  // legs intentionally show is_balanced=false (no cash moved), distinguishing a
+  // trade from a genuine cash buy/sell.
+  const logTrade = async ({ collection_id, date, notes, outgoing = [], incoming = [], cash = null }) => {
+    const tag = notes?.trim() ? `Trade: ${notes.trim()}` : 'Trade';
+    const collId = collection_id === 'all' ? null : (collection_id || null);
+    const when = date || new Date().toISOString().slice(0, 10);
+
+    // 1. Outgoing — retain-sell each at its credit value (equity-neutral leg).
+    for (const o of outgoing) {
+      const entry = entries.find(e => e.id === o.entryId);
+      if (!entry) continue;
+      const card = catalogIndex.get(entry.card_id);
+      const value = Number(o.value) || 0;
+      const sellTx = await store.insert('transactions', {
+        id: uid(),
+        collection_id: entry.collection_id,
+        card_id: entry.card_id,
+        card_display_name: card ? `${card.displayId || card.id} ${card.name}` : entry.card_id,
+        entry_id: entry.id,
+        type: 'sell',
+        amount: value,
+        contributions: [],
+        occurred_at: when,
+        notes: tag,
+        created_at: new Date().toISOString(),
+      });
+      if (sellTx) setTransactions(prev => [...prev, sellTx]);
+      await store.update('entries', entry.id, { date_sold: when, sold_price: value });
+      setEntries(prev => prev.filter(e => e.id !== entry.id));
+    }
+
+    // 2. Incoming — add each at its cost basis (equity-neutral buy leg). Funded
+    // by the traded-away cards, not new member cash, so contributions stay empty.
+    for (const inc of incoming) {
+      const created = await store.insert('entries', {
+        id: uid(),
+        card_id: inc.card_id,
+        collection_id: collId,
+        condition: inc.condition || 'Near Mint',
+        purchase_price: Number(inc.purchase_price) || 0,
+        contributions: [],
+        notes: tag,
+        acquired_at: when,
+        added_at: new Date().toISOString(),
+      });
+      if (!created) {
+        const err = getLastStoreError();
+        const detail = err ? `${err.code || ''} ${err.message || ''}`.trim() : '';
+        alert(`Couldn't add a traded-for card to Supabase.${detail ? `\n\n${detail}` : ''}`);
+        continue;
+      }
+      setEntries(prev => [...prev, created]);
+      const card = catalogIndex.get(inc.card_id);
+      const buyTx = await store.insert('transactions', {
+        id: uid(),
+        collection_id: collId,
+        card_id: inc.card_id,
+        card_display_name: card ? `${card.displayId || card.id} ${card.name}` : inc.card_id,
+        entry_id: created.id,
+        type: 'buy',
+        amount: Number(inc.purchase_price) || 0,
+        contributions: [],
+        occurred_at: when,
+        notes: tag,
+        created_at: new Date().toISOString(),
+      });
+      if (buyTx) setTransactions(prev => [...prev, buyTx]);
+    }
+
+    // 3. Net cash — one balanced leg. Cash OUT (the pool paid to sweeten the
+    // trade) reads like an expense (member capital in); cash IN (the pool got
+    // cash) reads like a payout (member capital out, negated by EquityPanel).
+    if (cash && Number(cash.amount) > 0 && cash.dir && cash.dir !== 'none') {
+      const amt = Number(cash.amount) || 0;
+      const cashTx = await store.insert('transactions', {
+        id: uid(),
+        collection_id: collId,
+        card_id: null,
+        card_display_name: `Trade cash ${cash.dir === 'in' ? 'received' : 'paid'}`,
+        type: cash.dir === 'out' ? 'expense' : 'payout',
+        amount: amt,
+        contributions: cash.member ? [{ name: cash.member, amount: amt }] : [],
+        occurred_at: when,
+        notes: tag,
+        created_at: new Date().toISOString(),
+      });
+      if (cashTx) setTransactions(prev => [...prev, cashTx]);
+    }
+  };
+
   // Manual transaction removal. Used to clean up mis-logged transfers/expenses
   // (or buys/sells the user wants to scrub). For buy/sell rows this leaves the
   // underlying entry alone — only the equity bookkeeping is undone.
@@ -823,6 +920,7 @@ export default function App() {
             transactions={transactions}
             collections={collections}
             entries={entries}
+            catalog={augmentedCatalog}
             catalogIndex={catalogIndex}
             variantRev={variantRev}
             activeCollectionId={activeCollectionId}
@@ -831,6 +929,7 @@ export default function App() {
               if (created) setTransactions(prev => [...prev, created]);
               else alert("Couldn't save the transaction. Check the console for the Supabase error.");
             }}
+            onLogTrade={logTrade}
             onRemoveTransaction={removeTransaction}
           />
         )}
@@ -2881,6 +2980,204 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
 }
 
 // ============================================================================
+// ============================================================================
+// TradeModal: record a trade — give away cards, receive cards, and/or move cash
+// (in or out). Outgoing cards are picked from the active collection; incoming
+// cards are searched from the catalog. The balance readout is informational
+// (trades needn't balance to the cent). See `logTrade` for the accounting.
+// ============================================================================
+function TradeModal({ members = [], collection, entries = [], catalog = [], catalogIndex = new Map(), onClose, onSave }) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [outgoing, setOutgoing] = useState([]); // [{ entryId, value }]
+  const [incoming, setIncoming] = useState([]); // [{ key, card_id, name, displayId, purchase_price, condition }]
+  const [cashDir, setCashDir] = useState('none'); // 'none' | 'in' | 'out'
+  const [cashAmount, setCashAmount] = useState('');
+  const [cashMember, setCashMember] = useState(members[0] || '');
+  const [query, setQuery] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const pickedOut = new Set(outgoing.map(o => o.entryId));
+  const availableEntries = entries.filter(e => !pickedOut.has(e.id));
+
+  const addOutgoing = (entryId) => {
+    const e = entries.find(x => x.id === entryId);
+    if (!e) return;
+    setOutgoing(prev => [...prev, { entryId, value: String(e.purchase_price ?? '') }]);
+  };
+  const updateOutgoing = (entryId, value) => setOutgoing(prev => prev.map(o => o.entryId === entryId ? { ...o, value } : o));
+  const removeOutgoing = (entryId) => setOutgoing(prev => prev.filter(o => o.entryId !== entryId));
+
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const out = [];
+    for (const c of catalog) {
+      const did = String(c.displayId || c.id || '').toLowerCase();
+      const nm = String(c.name || '').toLowerCase();
+      if (did.includes(q) || nm.includes(q)) out.push(c);
+      if (out.length >= 8) break;
+    }
+    return out;
+  }, [query, catalog]);
+
+  const addIncoming = (card) => {
+    const cid = card.canonicalId || card.id;
+    setIncoming(prev => [...prev, { key: uid(), card_id: cid, name: card.name, displayId: card.displayId || card.id, purchase_price: '', condition: 'Near Mint' }]);
+    setQuery('');
+  };
+  const updateIncoming = (key, patch) => setIncoming(prev => prev.map(i => i.key === key ? { ...i, ...patch } : i));
+  const removeIncoming = (key) => setIncoming(prev => prev.filter(i => i.key !== key));
+
+  const outTotal = outgoing.reduce((s, o) => s + (Number(o.value) || 0), 0);
+  const inTotal = incoming.reduce((s, i) => s + (Number(i.purchase_price) || 0), 0);
+  const cashAmt = Number(cashAmount) || 0;
+  // What you give vs what you get. Cash OUT adds to what you give; cash IN adds to what you get.
+  const giveTotal = outTotal + (cashDir === 'out' ? cashAmt : 0);
+  const getTotal = inTotal + (cashDir === 'in' ? cashAmt : 0);
+  const diff = getTotal - giveTotal;
+  const balanced = Math.abs(diff) < 0.01;
+
+  const valid = (outgoing.length > 0 || incoming.length > 0)
+    && (cashDir === 'none' || cashAmt > 0)
+    && incoming.every(i => Number(i.purchase_price) >= 0);
+
+  const iconBtn = { background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', padding: 4, display: 'inline-flex', alignItems: 'center' };
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave({
+      collection_id: collection?.id || null,
+      date: date || null,
+      notes: notes.trim(),
+      outgoing: outgoing.map(o => ({ entryId: o.entryId, value: Number(o.value) || 0 })),
+      incoming: incoming.map(i => ({ card_id: i.card_id, purchase_price: Number(i.purchase_price) || 0, condition: i.condition })),
+      cash: cashDir === 'none' ? null : { dir: cashDir, amount: cashAmt, member: cashMember || null },
+    });
+    setSaving(false);
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Logging a trade</div>
+            <div className="op-modal-title">Trade cards &amp; cash</div>
+            <div className="op-modal-sub">{collection?.name || 'Unscoped'}</div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          {/* GIVING — outgoing cards picked from this collection. */}
+          <Field label="Giving away (from this collection)">
+            {availableEntries.length > 0 ? (
+              <select value="" onChange={(e) => { if (e.target.value) addOutgoing(e.target.value); }}>
+                <option value="">+ Add a card you're giving…</option>
+                {availableEntries.map(e => {
+                  const c = catalogIndex.get(e.card_id);
+                  return (
+                    <option key={e.id} value={e.id}>
+                      {(c ? `${c.displayId || c.id} · ${c.name}` : e.card_id)}{e.grading_company ? ` (${e.grading_company} ${e.grade})` : ''}
+                    </option>
+                  );
+                })}
+              </select>
+            ) : <div style={{ opacity: 0.6, fontSize: 13 }}>No cards available in this collection.</div>}
+          </Field>
+          {outgoing.map(o => {
+            const e = entries.find(x => x.id === o.entryId);
+            const c = e ? catalogIndex.get(e.card_id) : null;
+            return (
+              <div key={o.entryId} className="op-form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
+                <div style={{ flex: 1, fontSize: 13, paddingBottom: 8 }}>{c ? `${c.displayId || c.id} · ${c.name}` : (e?.card_id || o.entryId)}</div>
+                <Field label="Credit value">
+                  <input type="number" step="0.01" value={o.value} onChange={(ev) => updateOutgoing(o.entryId, ev.target.value)} placeholder="0.00" />
+                </Field>
+                <button style={{ ...iconBtn, paddingBottom: 10 }} onClick={() => removeOutgoing(o.entryId)} title="Remove"><Trash2 size={15} /></button>
+              </div>
+            );
+          })}
+
+          {/* RECEIVING — incoming cards searched from the catalog. */}
+          <Field label="Receiving (search the catalog)">
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Card number or name to add…" />
+          </Field>
+          {results.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 170, overflowY: 'auto', marginTop: -6 }}>
+              {results.map(c => (
+                <div key={c.id} onClick={() => addIncoming(c)} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: 6, borderRadius: 6, cursor: 'pointer', background: 'rgba(255,255,255,0.04)' }}>
+                  <CardThumb card={c} size={34} />
+                  <div style={{ fontSize: 13 }}>{c.displayId || c.id} · {c.name}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {incoming.map(i => (
+            <div key={i.key} className="op-form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
+              <div style={{ flex: 1, fontSize: 13, paddingBottom: 8 }}>{i.displayId} · {i.name}</div>
+              <Field label="Condition">
+                <select value={i.condition} onChange={(e) => updateIncoming(i.key, { condition: e.target.value })}>
+                  {CONDITIONS.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </Field>
+              <Field label="Cost basis">
+                <input type="number" step="0.01" value={i.purchase_price} onChange={(e) => updateIncoming(i.key, { purchase_price: e.target.value })} placeholder="0.00" />
+              </Field>
+              <button style={{ ...iconBtn, paddingBottom: 10 }} onClick={() => removeIncoming(i.key)} title="Remove"><Trash2 size={15} /></button>
+            </div>
+          ))}
+
+          {/* CASH — net cash sweetener, in or out, attributed to a member. */}
+          <div className="op-form-row">
+            <Field label="Cash">
+              <select value={cashDir} onChange={(e) => setCashDir(e.target.value)}>
+                <option value="none">No cash</option>
+                <option value="in">Cash in (we receive)</option>
+                <option value="out">Cash out (we pay)</option>
+              </select>
+            </Field>
+            {cashDir !== 'none' && (
+              <Field label="Amount (USD)">
+                <input type="number" step="0.01" value={cashAmount} onChange={(e) => setCashAmount(e.target.value)} placeholder="0.00" />
+              </Field>
+            )}
+            {cashDir !== 'none' && (
+              <Field label={cashDir === 'in' ? 'Received by' : 'Paid by'}>
+                {members.length > 0 ? (
+                  <select value={cashMember} onChange={(e) => setCashMember(e.target.value)}>
+                    <option value="">— Pool —</option>
+                    {members.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                ) : <input value={cashMember} onChange={(e) => setCashMember(e.target.value)} placeholder="Name" />}
+              </Field>
+            )}
+          </div>
+
+          <div className="op-form-row">
+            <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+          </div>
+          <Field label="Notes (optional)">
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Who with, platform, reason…" />
+          </Field>
+
+          <div style={{ fontSize: 13, padding: '8px 10px', borderRadius: 8, background: balanced ? 'rgba(70,160,90,0.14)' : 'rgba(200,130,40,0.16)' }}>
+            Giving ${giveTotal.toFixed(2)} · Receiving ${getTotal.toFixed(2)} · {balanced ? 'Balanced' : `${diff > 0 ? 'getting' : 'giving'} $${Math.abs(diff).toFixed(2)} more`}
+          </div>
+
+          <div className="op-form-actions">
+            <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={saving || !valid}>
+              {saving ? 'Saving…' : 'Record trade'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TransferModal({ members = [], collection, onClose, onSave }) {
   const [fromName, setFromName] = useState(members[0] || '');
   const [toName, setToName] = useState(members[1] || '');
@@ -3431,7 +3728,7 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
 }
 
 // ============================================================================
-function TransactionsView({ transactions, collections, entries = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onRemoveTransaction = () => {} }) {
+function TransactionsView({ transactions, collections, entries = [], catalog = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onLogTrade = () => {}, onRemoveTransaction = () => {} }) {
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
   // Default the transactions view to the active collection — most users want
   // their current pool, not a global feed. The dropdown still has "All
@@ -3559,6 +3856,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
         <div className="op-filter-group">
           <div className="op-filter-label">Log</div>
           <div className="op-filter-pills">
+            <button className="op-filter-pill" onClick={() => setModal('trade')}>+ Trade</button>
             <button className="op-filter-pill" onClick={() => setModal('transfer')}>+ Transfer</button>
             <button className="op-filter-pill" onClick={() => setModal('expense')}>+ Expense</button>
             <button className="op-filter-pill" onClick={() => setModal('payout')}>+ Payout</button>
@@ -3567,6 +3865,20 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
         </div>
       </div>
 
+      {modal === 'trade' && (
+        <TradeModal
+          members={equityMembers}
+          collection={equityCollection}
+          entries={equityEntries.filter(e => !e.date_sold)}
+          catalog={catalog}
+          catalogIndex={catalogIndex}
+          onClose={() => setModal(null)}
+          onSave={async (payload) => {
+            await onLogTrade(payload);
+            setModal(null);
+          }}
+        />
+      )}
       {modal === 'transfer' && (
         <TransferModal
           members={equityMembers}
