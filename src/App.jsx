@@ -1740,7 +1740,7 @@ function CollectionSummary({ transactions = [], activeEntries = [], collections 
 
   return (
     <>
-      <div className="op-stats">
+      <div className="op-stats" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
         <Stat label="Net cash flow" value={`${totals.net >= 0 ? '+' : ''}$${totals.net.toFixed(2)}`} tone={totals.net >= 0 ? 'pos' : 'neg'} />
         <Stat label="Bought" value={`$${totals.bought.toFixed(2)}`} />
         <Stat label="Sold" value={`$${totals.sold.toFixed(2)}`} accent />
