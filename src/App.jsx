@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
-import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink, Archive, AlertTriangle } from 'lucide-react';
+import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink, AlertTriangle } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata, searchAlternateSource, deriveVariantKey, addExternalCard } from './catalog.js';
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
