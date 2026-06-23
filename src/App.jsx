@@ -4092,15 +4092,19 @@ function TransactionRow({ tx, collection, onEdit, onDelete }) {
       <div className={`op-tx-amount ${meta.tone}`}>
         {meta.sign}${amount.toFixed(2)}
       </div>
-      {onEdit && (
-        <button className="op-tx-delete" onClick={onEdit} title="Edit this transaction">
-          <Pencil size={14} />
-        </button>
-      )}
-      {onDelete && (
-        <button className="op-tx-delete" onClick={onDelete} title="Delete this transaction">
-          <Trash2 size={14} />
-        </button>
+      {(onEdit || onDelete) && (
+        <div className="op-tx-actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+          {onEdit && (
+            <button className="op-tx-delete" onClick={onEdit} title="Edit this transaction">
+              <Pencil size={14} />
+            </button>
+          )}
+          {onDelete && (
+            <button className="op-tx-delete" onClick={onDelete} title="Delete this transaction">
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
