@@ -364,6 +364,17 @@ const shared = {
     if (table === 'transactions') {
       const { data, error } = await supa.from('transactions').update(txPatchToDb(patch)).eq('id', id).select().single();
       if (error) { console.error(error); return null; }
+      // When the edit includes contributions, replace this tx's rows wholesale.
+      if (Array.isArray(patch.contributions)) {
+        await supa.from('transaction_contributions').delete().eq('transaction_id', id);
+        const rows = patch.contributions
+          .filter(c => c && c.name && Number(c.amount) !== 0)
+          .map(c => ({ vault_key: VAULT_KEY, transaction_id: id, member_name: String(c.name).trim(), amount: Number(c.amount) }));
+        if (rows.length) {
+          const { error: cErr } = await supa.from('transaction_contributions').insert(rows);
+          if (cErr) console.error('[storage] update tx contribs', cErr);
+        }
+      }
       const tc = await fetchContribsByTx();
       return txToApp(data, tc.get(data.id));
     }

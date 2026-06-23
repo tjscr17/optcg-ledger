@@ -823,6 +823,15 @@ export default function App() {
     setTransactions(prev => prev.filter(t => t.id !== id));
   };
 
+  // Edit a logged transaction's fields (description, amount, date, notes, and
+  // contributions). Equity recalculates from the updated rows on next render.
+  const updateTransaction = async (id, patch) => {
+    const updated = await store.update('transactions', id, patch);
+    if (updated) setTransactions(prev => prev.map(t => t.id === id ? updated : t));
+    else alert("Couldn't update the transaction. Check the console for the Supabase error.");
+    return updated;
+  };
+
   // 'all' is a synthetic collection that aggregates entries/transactions
   // across every real collection. We materialize it here so the rest of the
   // app can treat it like any other collection.
@@ -945,6 +954,7 @@ export default function App() {
               else alert("Couldn't save the transaction. Check the console for the Supabase error.");
             }}
             onLogTrade={logTrade}
+            onUpdateTransaction={updateTransaction}
             onRemoveTransaction={removeTransaction}
           />
         )}
@@ -3802,7 +3812,8 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
 }
 
 // ============================================================================
-function TransactionsView({ transactions, collections, entries = [], catalog = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onLogTrade = () => {}, onRemoveTransaction = () => {} }) {
+function TransactionsView({ transactions, collections, entries = [], catalog = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onLogTrade = () => {}, onUpdateTransaction = () => {}, onRemoveTransaction = () => {} }) {
+  const [editingTx, setEditingTx] = useState(null);
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
   // Default the transactions view to the active collection — most users want
   // their current pool, not a global feed. The dropdown still has "All
@@ -4018,6 +4029,7 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
               key={t.id}
               tx={t}
               collection={collectionsById.get(t.collection_id)}
+              onEdit={() => setEditingTx(t)}
               onDelete={() => {
                 const label = t.type === 'transfer' ? 'transfer'
                   : t.type === 'expense' ? 'expense'
@@ -4032,11 +4044,27 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
           ))}
         </div>
       )}
+
+      {editingTx && (
+        <EditTransactionModal
+          tx={editingTx}
+          members={(() => {
+            const col = collectionsById.get(editingTx.collection_id);
+            const m = Array.isArray(col?.members) ? col.members : [];
+            return m.length ? m : aggregateMembers;
+          })()}
+          onClose={() => setEditingTx(null)}
+          onSave={async (patch) => {
+            await onUpdateTransaction(editingTx.id, patch);
+            setEditingTx(null);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function TransactionRow({ tx, collection, onDelete }) {
+function TransactionRow({ tx, collection, onEdit, onDelete }) {
   const amount = Number(tx.amount) || 0;
   // Visual style + sign per type
   const meta = {
@@ -4064,11 +4092,109 @@ function TransactionRow({ tx, collection, onDelete }) {
       <div className={`op-tx-amount ${meta.tone}`}>
         {meta.sign}${amount.toFixed(2)}
       </div>
+      {onEdit && (
+        <button className="op-tx-delete" onClick={onEdit} title="Edit this transaction">
+          <Pencil size={14} />
+        </button>
+      )}
       {onDelete && (
         <button className="op-tx-delete" onClick={onDelete} title="Delete this transaction">
           <Trash2 size={14} />
         </button>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// EditTransactionModal: amend a logged transaction's description, amount, date,
+// notes, and contributions. Type is fixed (changing buy<->sell etc. alters
+// equity semantics and entry linkage — delete & re-log to switch).
+// ============================================================================
+function EditTransactionModal({ tx, members = [], onClose, onSave }) {
+  const [description, setDescription] = useState(tx.card_display_name || '');
+  const [amount, setAmount] = useState(String(tx.amount ?? ''));
+  const [date, setDate] = useState((tx.occurred_at || tx.created_at || '').slice(0, 10));
+  const [notes, setNotes] = useState(tx.notes || '');
+  const [contribs, setContribs] = useState(
+    Array.isArray(tx.contributions) ? tx.contributions.map(c => ({ name: c.name, amount: String(c.amount) })) : []
+  );
+  const [saving, setSaving] = useState(false);
+
+  const addContrib = () => setContribs([...contribs, { name: '', amount: '' }]);
+  const updateContrib = (i, patch) => setContribs(contribs.map((c, idx) => idx === i ? { ...c, ...patch } : c));
+  const removeContrib = (i) => setContribs(contribs.filter((_, idx) => idx !== i));
+
+  const contribTotal = contribs.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const amt = Number(amount) || 0;
+  // Single-sided legs (buy/sell/expense/payout) are expected to balance to the
+  // amount; transfers are signed (net zero), so don't warn on those.
+  const expectBalance = ['buy', 'sell', 'expense', 'payout'].includes(tx.type) && contribs.length > 0;
+  const mismatch = expectBalance && Math.abs(contribTotal - amt) > 0.01;
+
+  const typeLabel = { buy: 'buy', sell: 'sell', transfer: 'transfer', expense: 'expense', payout: 'payout' }[tx.type] || (tx.type || 'transaction');
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave({
+      card_display_name: description.trim() || null,
+      amount: amt,
+      occurred_at: date || null,
+      notes: notes.trim(),
+      contributions: contribs.filter(c => c.name.trim() && Number(c.amount) !== 0).map(c => ({ name: c.name.trim(), amount: Number(c.amount) })),
+    });
+    setSaving(false);
+  };
+
+  return (
+    <div className="op-modal-backdrop">
+      <div className="op-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Editing {typeLabel}</div>
+            <div className="op-modal-title">Edit transaction</div>
+            <div className="op-modal-sub">Type is fixed — delete &amp; re-log to switch it.</div>
+          </div>
+        </div>
+        <div className="op-form">
+          <Field label="Description">
+            <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this transaction is" />
+          </Field>
+          <div className="op-form-row">
+            <Field label="Amount (USD)">
+              <input type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
+            </Field>
+            <Field label="Date">
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </Field>
+          </div>
+
+          <div className="op-form-section-head" style={{ marginTop: 4 }}>
+            <div className="op-form-section-title">Contributions</div>
+            <button className="op-btn-ghost" onClick={addContrib}><Plus size={14} /> Add</button>
+          </div>
+          {contribs.length === 0 && <div style={{ opacity: 0.6, fontSize: 13 }}>No contributions — this leg doesn't move anyone's equity.</div>}
+          {contribs.map((c, i) => (
+            <ContribRow key={i} value={c} members={members} onChange={(patch) => updateContrib(i, patch)} onRemove={() => removeContrib(i)} />
+          ))}
+          {contribs.length > 0 && (
+            <div className={`op-contrib-check ${mismatch ? 'is-warn' : 'is-ok'}`}>
+              Contribution total: <strong>${contribTotal.toFixed(2)}</strong>{expectBalance && <> of <strong>${amt.toFixed(2)}</strong></>}
+              {mismatch && <span> · doesn't match the amount</span>}
+            </div>
+          )}
+
+          <Field label="Notes (optional)">
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </Field>
+
+          <div className="op-form-actions">
+            <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
