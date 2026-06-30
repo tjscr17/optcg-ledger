@@ -1335,6 +1335,8 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
   const isSynthetic = Boolean(collection?.synthetic);
   const [entrySort, setEntrySort] = useStoredState('optcg:collection:entrySort', 'recent');
   const [colQ, setColQ] = useStoredState('optcg:collection:q', '');
+  const [tcgFilter, setTcgFilter] = useStoredState('optcg:collection:tcgFilter', 'all');
+  const tcgOpts = useMemo(() => tcgFilterOptions([...catalogIndex.values()]), [catalogIndex]);
 
   // Per-entry expense sum (card-scoped expense txs linked via entry_id). Used
   // for cost-basis display so grading/shipping/etc costs roll into the entry's
@@ -1360,9 +1362,10 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
 
   const searchedEntries = useMemo(() => {
     const needle = colQ.trim().toLowerCase();
-    if (!needle) return entries;
     return entries.filter(e => {
       const c = catalogIndex.get(e.card_id);
+      if (tcgFilter !== 'all' && c?.tcgCode !== tcgFilter) return false;
+      if (!needle) return true;
       const hay = [
         c?.name, c?.fullName, c?.variant, c?.id, c?.displayId, c?.setName,
         e.condition, e.notes, e.grading_company,
@@ -1370,7 +1373,7 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
       ].filter(Boolean).join(' ').toLowerCase();
       return hay.includes(needle);
     });
-  }, [entries, catalogIndex, colQ]);
+  }, [entries, catalogIndex, colQ, tcgFilter]);
 
   const sortedEntries = useMemo(() => {
     const arr = [...searchedEntries];
@@ -1520,6 +1523,14 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
             )}
           </div>
           <div className="op-entries-sort">
+            {tcgOpts.length > 2 && (
+              <>
+                <span className="op-entries-sort-label">Game</span>
+                <select value={tcgFilter} onChange={(e) => setTcgFilter(e.target.value)}>
+                  {tcgOpts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+                </select>
+              </>
+            )}
             <span className="op-entries-sort-label">Sort by</span>
             <select value={entrySort} onChange={(e) => setEntrySort(e.target.value)}>
               <option value="recent">Recently logged</option>
@@ -1773,6 +1784,8 @@ function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
 
   const [q, setQ] = useStoredState('optcg:sold:q', '');
   const [contributor, setContributor] = useState('all');
+  const [tcgFilter, setTcgFilter] = useStoredState('optcg:sold:tcgFilter', 'all');
+  const tcgOpts = useMemo(() => tcgFilterOptions([...catalogIndex.values()]), [catalogIndex]);
 
   // Contributors come from each sold card's (buy-tx) contributions.
   const contributorOptions = useMemo(() => {
@@ -1786,6 +1799,7 @@ function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
     return entries
       .filter(e => {
         if (contributor !== 'all' && !(e.contributions || []).some(c => c.name === contributor)) return false;
+        if (tcgFilter !== 'all' && catalogIndex.get(e.card_id)?.tcgCode !== tcgFilter) return false;
         if (!needle) return true;
         const card = catalogIndex.get(e.card_id);
         const hay = [
@@ -1802,7 +1816,7 @@ function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
         return { e, card, cost, sold, pl: sold - cost };
       })
       .sort((a, b) => (b.e.date_sold || '').localeCompare(a.e.date_sold || ''));
-  }, [entries, catalogIndex, variantRev, q, contributor]);
+  }, [entries, catalogIndex, variantRev, q, contributor, tcgFilter]);
 
   const totals = rows.reduce((t, r) => ({ cost: t.cost + r.cost, sold: t.sold + r.sold, pl: t.pl + r.pl }), { cost: 0, sold: 0, pl: 0 });
 
@@ -1823,6 +1837,11 @@ function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
         <Search size={18} className="op-search-icon" />
         <input className="op-search-input" placeholder="Search sold cards…" value={q} onChange={(e) => setQ(e.target.value)} />
         {q && <button className="op-search-clear" onClick={() => setQ('')}><X size={15} /></button>}
+        {tcgOpts.length > 2 && (
+          <select value={tcgFilter} onChange={(e) => setTcgFilter(e.target.value)} style={{ marginLeft: 8 }}>
+            {tcgOpts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+          </select>
+        )}
         <select value={contributor} onChange={(e) => setContributor(e.target.value)} style={{ marginLeft: 8 }}>
           <option value="all">All contributors</option>
           {contributorOptions.map(n => <option key={n} value={n}>{n}</option>)}
@@ -2657,19 +2676,22 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
 // last_checked_at, last_seen_url, last_seen_price, last_seen_source })`.
 function WatchView({ watchlist, catalogIndex, variantRev = 0, onCardClick, onBrowseCatalog = () => {}, onRemove, onUpdate }) {
   const [q, setQ] = useStoredState('optcg:watch:q', '');
+  const [tcgFilter, setTcgFilter] = useStoredState('optcg:watch:tcgFilter', 'all');
+  const tcgOpts = useMemo(() => tcgFilterOptions([...catalogIndex.values()]), [catalogIndex]);
 
   const enriched = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return watchlist
       .map(w => ({ w, card: catalogIndex.get(w.card_id) }))
       .filter(({ w, card }) => {
+        if (tcgFilter !== 'all' && card?.tcgCode !== tcgFilter) return false;
         if (!needle) return true;
         const hay = [w.card_display_name, card?.name, card?.fullName, w.notes, card?.setName].filter(Boolean).join(' ').toLowerCase();
         return hay.includes(needle);
       })
       .sort((a, b) => (b.w.created_at || '').localeCompare(a.w.created_at || ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [watchlist, catalogIndex, q, variantRev]);
+  }, [watchlist, catalogIndex, q, tcgFilter, variantRev]);
 
   return (
     <div className="op-view">
@@ -2698,6 +2720,12 @@ function WatchView({ watchlist, catalogIndex, variantRev = 0, onCardClick, onBro
           <button className="op-search-clear" onClick={() => setQ('')}><X size={15} /></button>
         )}
       </div>
+
+      {tcgOpts.length > 2 && (
+        <div className="op-filters">
+          <FilterGroup label="Game" value={tcgFilter} onChange={setTcgFilter} mode="select" options={tcgOpts} />
+        </div>
+      )}
 
       {watchlist.length === 0 ? (
         <div className="op-empty">
@@ -5556,7 +5584,9 @@ function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, o
   const [filterCompany, setFilterCompany] = useStoredState('op:sales:filter:company', 'all');
   const [filterGrade, setFilterGrade] = useStoredState('op:sales:filter:grade', 'all');
   const [filterMarket, setFilterMarket] = useStoredState('op:sales:filter:market', 'all');
+  const [filterTcg, setFilterTcg] = useStoredState('op:sales:filter:tcg', 'all');
   const [days, setDays] = useStoredState('op:sales:filter:days', '180');
+  const tcgOpts = useMemo(() => tcgFilterOptions([...catalogIndex.values()]), [catalogIndex]);
 
   const companies = useMemo(() => Array.from(new Set(sales.map(s => s.grading_company).filter(Boolean))).sort(), [sales]);
   const grades = useMemo(() => Array.from(new Set(sales.map(s => s.grade).filter(g => g != null).map(g => String(g)))).sort((a, b) => Number(b) - Number(a)), [sales]);
@@ -5579,6 +5609,7 @@ function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, o
     const cutoff = days === 'all' ? 0 : Date.now() - Number(days) * 24 * 60 * 60 * 1000;
     return augmented
       .filter(s => {
+        if (filterTcg !== 'all' && s._effectiveCard?.tcgCode !== filterTcg) return false;
         if (filterCompany !== 'all' && (s.grading_company || '') !== filterCompany) return false;
         if (filterGrade !== 'all' && String(s.grade) !== filterGrade) return false;
         if (filterMarket !== 'all' && (s.marketplace || '') !== filterMarket) return false;
@@ -5591,7 +5622,7 @@ function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, o
         return true;
       })
       .sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || ''));
-  }, [augmented, filterCard, filterCompany, filterGrade, filterMarket, days]);
+  }, [augmented, filterCard, filterCompany, filterGrade, filterMarket, filterTcg, days]);
 
   const totalValue = filtered.reduce((acc, s) => acc + (Number(s.sale_price) || 0), 0);
 
@@ -5643,6 +5674,11 @@ function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, o
           onChange={(e) => setFilterCard(e.target.value)}
           style={{ flex: 1, minWidth: 220 }}
         />
+        {tcgOpts.length > 2 && (
+          <select className="op-input" value={filterTcg} onChange={(e) => setFilterTcg(e.target.value)}>
+            {tcgOpts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+          </select>
+        )}
         <select className="op-input" value={filterCompany} onChange={(e) => setFilterCompany(e.target.value)}>
           <option value="all">All companies</option>
           {companies.map(c => <option key={c} value={c}>{c}</option>)}
